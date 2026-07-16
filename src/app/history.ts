@@ -77,3 +77,33 @@ export function unshiftHistory(h: HistoryBag, id: number): void {
   h.history.unshift(id);
   h.historyCursor = 0;
 }
+
+/**
+ * Remove a dead neighbor id without moving off the currently shown entry.
+ * - back: remove history[cursor - 1]
+ * - forward: remove history[cursor + 1]
+ * Cursor is adjusted so the current id stays selected.
+ */
+export function removeHistoryNeighbor(
+  h: HistoryBag,
+  direction: "back" | "forward",
+): boolean {
+  const index =
+    direction === "back" ? h.historyCursor - 1 : h.historyCursor + 1;
+  if (index < 0 || index >= h.history.length) return false;
+  // Never remove the entry at cursor (current item).
+  if (index === h.historyCursor) return false;
+
+  h.history.splice(index, 1);
+  if (h.historyCursor > index) {
+    h.historyCursor -= 1;
+  }
+  if (h.history.length === 0) {
+    h.historyCursor = -1;
+  } else if (h.historyCursor >= h.history.length) {
+    h.historyCursor = h.history.length - 1;
+  } else if (h.historyCursor < 0) {
+    h.historyCursor = 0;
+  }
+  return true;
+}

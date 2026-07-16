@@ -13,6 +13,7 @@ import {
   peekHistoryBack,
   peekHistoryForward,
   pushHistory,
+  removeHistoryNeighbor,
   resetHistory,
   unshiftHistory,
 } from "./history.ts";
@@ -119,5 +120,44 @@ describe("history", () => {
     clearHistory(h);
     assert.deepEqual(h.history, []);
     assert.equal(h.historyCursor, -1);
+  });
+
+  it("removeHistoryNeighbor back drops previous dead id and keeps current", () => {
+    const h = createHistory();
+    resetHistory(h, 1);
+    pushHistory(h, 99); // dead
+    pushHistory(h, 3);
+    assert.equal(h.historyCursor, 2);
+    assert.equal(peekHistoryBack(h), 99);
+    assert.equal(removeHistoryNeighbor(h, "back"), true);
+    assert.deepEqual(h.history, [1, 3]);
+    // Current was 3 at index 2; after removing index 1 → 3 at index 1
+    assert.equal(h.historyCursor, 1);
+    assert.equal(h.history[h.historyCursor], 3);
+    assert.equal(peekHistoryBack(h), 1);
+  });
+
+  it("removeHistoryNeighbor forward drops next dead id and keeps current", () => {
+    const h = createHistory();
+    resetHistory(h, 1);
+    pushHistory(h, 2);
+    pushHistory(h, 99); // dead
+    pushHistory(h, 4);
+    h.historyCursor = 1; // on 2
+    assert.equal(peekHistoryForward(h), 99);
+    assert.equal(removeHistoryNeighbor(h, "forward"), true);
+    assert.deepEqual(h.history, [1, 2, 4]);
+    assert.equal(h.historyCursor, 1);
+    assert.equal(h.history[h.historyCursor], 2);
+    assert.equal(peekHistoryForward(h), 4);
+  });
+
+  it("removeHistoryNeighbor at ends is no-op", () => {
+    const h = createHistory();
+    resetHistory(h, 1);
+    assert.equal(removeHistoryNeighbor(h, "back"), false);
+    assert.equal(removeHistoryNeighbor(h, "forward"), false);
+    assert.deepEqual(h.history, [1]);
+    assert.equal(h.historyCursor, 0);
   });
 });

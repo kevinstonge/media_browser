@@ -19,6 +19,7 @@ import {
   peekHistoryBack,
   peekHistoryForward,
   pushHistory,
+  removeHistoryNeighbor,
   resetHistory,
   setCurrentMedia,
   state,
@@ -103,22 +104,55 @@ async function pickRandomNext(): Promise<MediaItem | null> {
   return getRandom(root.id, null, excludeId);
 }
 
-/** Load history id only after success; never move cursor on failure. */
-async function loadHistoryId(id: number, direction: "back" | "forward"): Promise<boolean> {
-  try {
-    const item = await getMedia(id);
-    if (!item) {
-      flashStatus("History item missing", 3000);
-      return false;
+/**
+ * Walk history in direction: peek → load → commit on success.
+ * Dead (null) ids are spliced out and the walk retries so Prev/Next cannot stick.
+ * Transient IPC errors stop without mutating history.
+ *
+ * @returns "loaded" | "exhausted" (no more history) | "error"
+ */
+async function walkHistory(
+  direction: "back" | "forward",
+): Promise<"loaded" | "exhausted" | "error"> {
+  let skipped = 0;
+  while (true) {
+    const id =
+      direction === "back" ? peekHistoryBack() : peekHistoryForward();
+    if (id == null) {
+      if (skipped > 0) {
+        flashStatus(
+          skipped === 1
+            ? "History item missing — skipped"
+            : `Skipped ${skipped} missing history items`,
+          2500,
+        );
+      }
+      return "exhausted";
     }
-    if (direction === "back") commitHistoryBack();
-    else commitHistoryForward();
-    await displayMedia(item);
-    return true;
-  } catch (err) {
-    console.error("history load failed", err);
-    flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
-    return false;
+
+    try {
+      const item = await getMedia(id);
+      if (!item) {
+        // Hard-deleted / gone row — drop slot and retry next neighbor.
+        if (!removeHistoryNeighbor(direction)) {
+          return "exhausted";
+        }
+        skipped += 1;
+        continue;
+      }
+      if (direction === "back") commitHistoryBack();
+      else commitHistoryForward();
+      await displayMedia(item);
+      if (skipped > 0) {
+        // Brief note; displayMedia also flashes filename.
+        flashStatus(item.filename, 2500);
+      }
+      return "loaded";
+    } catch (err) {
+      console.error("history load failed", err);
+      flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
+      return "error";
+    }
   }
 }
 
@@ -129,12 +163,11 @@ export async function goNext(): Promise<void> {
   state.navigating = true;
   try {
     // Random modes: replay forward history when not at tip (peek, then commit).
+    // Dead ids are pruned so we never stick on a missing slot.
     if (state.navMode !== "alpha") {
-      const fwd = peekHistoryForward();
-      if (fwd != null) {
-        await loadHistoryId(fwd, "forward");
-        return;
-      }
+      const result = await walkHistory("forward");
+      if (result === "loaded" || result === "error") return;
+      // exhausted → pick a new random item below
     }
 
     let item: MediaItem | null = null;
@@ -168,14 +201,11 @@ export async function goPrev(): Promise<void> {
 
   state.navigating = true;
   try {
-    const back = peekHistoryBack();
-    if (back != null) {
-      await loadHistoryId(back, "back");
-      return;
-    }
+    const result = await walkHistory("back");
+    if (result === "loaded" || result === "error") return;
+    // exhausted history — alpha can still SQL-prev; random stays at first entry
 
     if (state.navMode !== "alpha") {
-      // Random modes: stay at first history entry.
       return;
     }
 

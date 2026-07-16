@@ -11,6 +11,7 @@ import {
   peekHistoryBack as peekBackBag,
   peekHistoryForward as peekForwardBag,
   pushHistory as pushHistoryBag,
+  removeHistoryNeighbor as removeNeighborBag,
   resetHistory as resetHistoryBag,
   unshiftHistory as unshiftHistoryBag,
   type HistoryBag,
@@ -99,6 +100,11 @@ export function commitHistoryForward(): void {
 
 export function unshiftHistory(id: number): void {
   unshiftHistoryBag(hist(), id);
+}
+
+/** Drop a dead neighbor id; keeps current entry selected. */
+export function removeHistoryNeighbor(direction: "back" | "forward"): boolean {
+  return removeNeighborBag(hist(), direction);
 }
 
 export function isNavMode(value: unknown): value is NavMode {
