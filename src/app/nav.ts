@@ -5,6 +5,9 @@
  * nav mode + slideshow history. Manual steps notify the slideshow timer
  * so the duration clock resets.
  *
+ * Each goNext/goPrev freezes the history bag + nav session generation at
+ * entry so Stop/Start mid-await cannot redirect mutations onto the other bag.
+ *
  * Inputs: Right = next, Left = prev; right-click = next, left-click = prev.
  * Clicks over chrome / form controls / video do not fire left-click prev.
  */
@@ -17,19 +20,25 @@ import {
   type MediaItem,
 } from "./api";
 import {
+  commitHistoryBack as commitBackBag,
+  commitHistoryForward as commitForwardBag,
+  peekHistoryBack as peekBackBag,
+  peekHistoryForward as peekForwardBag,
+  pushHistory as pushHistoryBag,
+  removeHistoryNeighbor as removeNeighborBag,
+  unshiftHistory as unshiftHistoryBag,
+  type HistoryBag,
+} from "./history";
+import {
+  activeHistoryBag,
   activeNavMode,
-  commitActiveHistoryBack,
-  commitActiveHistoryForward,
+  clampSlideshowDurationSec,
   isNavMode,
+  isNavSessionStale,
   isSlideshowActive,
-  peekActiveHistoryBack,
-  peekActiveHistoryForward,
-  pushActiveHistory,
-  removeActiveHistoryNeighbor,
   resetHistory,
   setCurrentMedia,
   state,
-  unshiftActiveHistory,
   type NavMode,
 } from "./state";
 import { isOverChrome } from "./ui/chrome";
@@ -115,11 +124,12 @@ function canNavigate(): boolean {
   );
 }
 
-async function pickRandomNext(): Promise<MediaItem | null> {
+async function pickRandomNext(
+  mode: NavMode,
+  excludeId: number | null,
+): Promise<MediaItem | null> {
   const root = state.root;
   if (!root) return null;
-  const excludeId = state.currentMediaId;
-  const mode = activeNavMode();
   if (mode === "random_current_dir") {
     const parent = state.currentMedia?.parentDir ?? null;
     return getRandom(root.id, parent, excludeId);
@@ -128,21 +138,22 @@ async function pickRandomNext(): Promise<MediaItem | null> {
 }
 
 /**
- * Walk active history in direction: peek → load → commit on success.
- * Dead (null) ids are spliced out and the walk retries so Prev/Next cannot stick.
- * Transient IPC errors stop without mutating history.
+ * Walk a frozen history bag: peek → load → commit on success.
+ * Aborts cleanly if nav session generation changes mid-flight (Stop/Start).
  *
- * @returns "loaded" | "exhausted" (no more history) | "error"
+ * @returns "loaded" | "exhausted" | "error" | "aborted"
  */
 async function walkHistory(
+  bag: HistoryBag,
   direction: "back" | "forward",
-): Promise<"loaded" | "exhausted" | "error"> {
+  generation: number,
+): Promise<"loaded" | "exhausted" | "error" | "aborted"> {
   let skipped = 0;
   while (true) {
+    if (isNavSessionStale(generation)) return "aborted";
+
     const id =
-      direction === "back"
-        ? peekActiveHistoryBack()
-        : peekActiveHistoryForward();
+      direction === "back" ? peekBackBag(bag) : peekForwardBag(bag);
     if (id == null) {
       if (skipped > 0) {
         flashStatus(
@@ -157,19 +168,21 @@ async function walkHistory(
 
     try {
       const item = await getMedia(id);
+      if (isNavSessionStale(generation)) return "aborted";
+
       if (!item) {
         // Hard-deleted / gone row — drop slot and retry next neighbor.
-        if (!removeActiveHistoryNeighbor(direction)) {
+        if (!removeNeighborBag(bag, direction)) {
           return "exhausted";
         }
         skipped += 1;
         continue;
       }
-      if (direction === "back") commitActiveHistoryBack();
-      else commitActiveHistoryForward();
+      if (direction === "back") commitBackBag(bag);
+      else commitForwardBag(bag);
       await displayMedia(item);
+      if (isNavSessionStale(generation)) return "aborted";
       if (skipped > 0) {
-        // Brief note; displayMedia also flashes filename.
         flashStatus(item.filename, 2500);
       }
       return "loaded";
@@ -185,42 +198,48 @@ async function walkHistory(
 export async function goNext(): Promise<void> {
   if (!canNavigate() || state.currentMediaId == null) return;
 
+  // Freeze bag + mode + generation so Stop mid-await cannot redirect writes.
+  const bag = activeHistoryBag();
+  const mode = activeNavMode();
+  const generation = state.navSessionGeneration;
+  const startId = state.currentMediaId;
+
   state.navigating = true;
   try {
-    const mode = activeNavMode();
-
     // Random modes: replay forward history when not at tip (peek, then commit).
-    // Dead ids are pruned so we never stick on a missing slot.
     if (mode !== "alpha") {
-      const result = await walkHistory("forward");
+      const result = await walkHistory(bag, "forward", generation);
       if (result === "loaded") {
-        notifyNavStep();
+        if (!isNavSessionStale(generation)) notifyNavStep();
         return;
       }
-      if (result === "error") return;
+      if (result === "error" || result === "aborted") return;
       // exhausted → pick a new random item below
     }
 
+    if (isNavSessionStale(generation)) return;
+
     let item: MediaItem | null = null;
     if (mode === "alpha") {
-      item = await getNeighbor(state.currentMediaId, "next");
+      item = await getNeighbor(startId, "next");
     } else {
-      item = await pickRandomNext();
+      item = await pickRandomNext(mode, startId);
     }
 
+    if (isNavSessionStale(generation)) return;
     if (!item) return;
 
     // Single-item library / same id: keep history stable, skip media rebuild.
     if (item.id === state.currentMediaId) {
-      pushActiveHistory(item.id);
-      // Still reset the slideshow clock so the user sees a full duration.
-      notifyNavStep();
+      pushHistoryBag(bag, item.id);
+      if (!isNavSessionStale(generation)) notifyNavStep();
       return;
     }
 
-    pushActiveHistory(item.id);
+    pushHistoryBag(bag, item.id);
+    if (isNavSessionStale(generation)) return;
     await displayMedia(item);
-    notifyNavStep();
+    if (!isNavSessionStale(generation)) notifyNavStep();
   } catch (err) {
     console.error("goNext failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
@@ -233,34 +252,41 @@ export async function goNext(): Promise<void> {
 export async function goPrev(): Promise<void> {
   if (!canNavigate() || state.currentMediaId == null) return;
 
+  const bag = activeHistoryBag();
+  const mode = activeNavMode();
+  const generation = state.navSessionGeneration;
+  const startId = state.currentMediaId;
+
   state.navigating = true;
   try {
-    const mode = activeNavMode();
-    const result = await walkHistory("back");
+    const result = await walkHistory(bag, "back", generation);
     if (result === "loaded") {
-      notifyNavStep();
+      if (!isNavSessionStale(generation)) notifyNavStep();
       return;
     }
-    if (result === "error") return;
+    if (result === "error" || result === "aborted") return;
     // exhausted history — alpha can still SQL-prev; random stays at first entry
 
     if (mode !== "alpha") {
       return;
     }
 
-    const item = await getNeighbor(state.currentMediaId, "prev");
+    if (isNavSessionStale(generation)) return;
+
+    const item = await getNeighbor(startId, "prev");
+    if (isNavSessionStale(generation)) return;
     if (!item) return;
 
     if (item.id === state.currentMediaId) {
-      // Single-item wrap — no DOM rebuild.
-      unshiftActiveHistory(item.id);
-      notifyNavStep();
+      unshiftHistoryBag(bag, item.id);
+      if (!isNavSessionStale(generation)) notifyNavStep();
       return;
     }
 
-    unshiftActiveHistory(item.id);
+    unshiftHistoryBag(bag, item.id);
+    if (isNavSessionStale(generation)) return;
     await displayMedia(item);
-    notifyNavStep();
+    if (!isNavSessionStale(generation)) notifyNavStep();
   } catch (err) {
     console.error("goPrev failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
@@ -288,9 +314,10 @@ export async function setSlideshowNavMode(mode: NavMode): Promise<void> {
 }
 
 export async function setSlideshowDurationSec(seconds: number): Promise<void> {
-  state.slideshowDurationSec = seconds;
+  const clamped = clampSlideshowDurationSec(seconds);
+  state.slideshowDurationSec = clamped;
   try {
-    await settingsSet("slideshow_duration_sec", JSON.stringify(seconds));
+    await settingsSet("slideshow_duration_sec", JSON.stringify(clamped));
   } catch (err) {
     console.warn("persist slideshow_duration_sec failed", err);
   }

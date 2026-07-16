@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:unit": "tsx --test src/app/history.test.ts"
+    "test:unit": "tsx --test src/app/history.test.ts src/app/state.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

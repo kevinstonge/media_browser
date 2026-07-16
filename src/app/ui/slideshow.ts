@@ -18,7 +18,9 @@ import {
   type StatusFn,
 } from "../nav";
 import {
+  bumpNavSessionGeneration,
   clearSlideshowHistory,
+  reconcileBrowseHistoryWithCurrent,
   resetSlideshowHistory,
   state,
 } from "../state";
@@ -90,7 +92,9 @@ function cancelTimer(): void {
 function scheduleTimer(): void {
   cancelTimer();
   if (state.slideshowStatus !== "playing") return;
-  const ms = Math.max(1, state.slideshowDurationSec) * 1000;
+  // Duration is clamped on set/load; still guard NaN/0 for safety.
+  const sec = Math.max(1, state.slideshowDurationSec || 1);
+  const ms = sec * 1000;
   timerId = window.setTimeout(() => {
     timerId = null;
     void onTimerTick();
@@ -123,6 +127,8 @@ export async function startSlideshow(): Promise<void> {
     return;
   }
 
+  // Invalidate any in-flight browse nav so it cannot write slideshow bag mid-start.
+  bumpNavSessionGeneration();
   clearSlideshowHistory();
 
   try {
@@ -143,11 +149,14 @@ export async function startSlideshow(): Promise<void> {
     setStatus(`Slideshow failed: ${formatErr(err)}`, true);
     clearSlideshowHistory();
     state.slideshowStatus = "idle";
+    bumpNavSessionGeneration();
     updateControls();
     return;
   }
 
   state.slideshowStatus = "playing";
+  // Fresh generation for the playing session (invalidates any race from seed await).
+  bumpNavSessionGeneration();
   scheduleTimer();
   updateControls();
   setStatus(
@@ -179,13 +188,21 @@ export function resumeSlideshow(): void {
 
 /**
  * Exit slideshow: cancel timer, erase slideshow history.
- * Current media remains; browse history continues for manual navigation.
+ * Current media remains; browse history is reconciled so Prev continues
+ * from the displayed item (stack preserved via push, not reset).
+ *
+ * Bumps nav session generation first so any in-flight goNext/goPrev that
+ * captured the slideshow bag abandons further commits/displays.
  */
 export function stopSlideshow(): void {
   if (state.slideshowStatus === "idle") return;
   cancelTimer();
+  // Invalidate in-flight nav before flipping status → idle (avoids browse writes).
+  bumpNavSessionGeneration();
   clearSlideshowHistory();
   state.slideshowStatus = "idle";
+  // Manual browse continues on current item: tip browse history at current.
+  reconcileBrowseHistoryWithCurrent();
   updateControls();
   setStatus("Slideshow stopped", true);
   window.setTimeout(() => setStatus("", false), 2000);

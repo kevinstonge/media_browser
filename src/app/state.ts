@@ -53,6 +53,11 @@ export interface AppState {
   /** Slideshow session history (independent of browse history). */
   slideshowHistory: number[];
   slideshowHistoryCursor: number;
+  /**
+   * Bumped when slideshow session starts/stops so in-flight goNext/goPrev
+   * can abandon commits against a stale session.
+   */
+  navSessionGeneration: number;
 }
 
 const browse0 = createHistory();
@@ -74,6 +79,7 @@ export const state: AppState = {
   historyCursor: browse0.historyCursor,
   slideshowHistory: slideshow0.history,
   slideshowHistoryCursor: slideshow0.historyCursor,
+  navSessionGeneration: 0,
 };
 
 /**
@@ -111,17 +117,19 @@ const slideshowBagProxy: HistoryBag = {
   },
 };
 
-function browseBag(): HistoryBag {
+export function browseHistoryBag(): HistoryBag {
   return browseBagProxy;
 }
 
-function slideshowBag(): HistoryBag {
+export function slideshowHistoryBag(): HistoryBag {
   return slideshowBagProxy;
 }
 
 /** History bag currently used by next/prev (slideshow overrides browse). */
 export function activeHistoryBag(): HistoryBag {
-  return state.slideshowStatus !== "idle" ? slideshowBag() : browseBag();
+  return state.slideshowStatus !== "idle"
+    ? slideshowHistoryBag()
+    : browseHistoryBag();
 }
 
 /** Nav mode currently used by next/prev. */
@@ -135,6 +143,15 @@ export function isSlideshowActive(): boolean {
   return state.slideshowStatus !== "idle";
 }
 
+/** Invalidate in-flight goNext/goPrev that captured an older generation. */
+export function bumpNavSessionGeneration(): void {
+  state.navSessionGeneration += 1;
+}
+
+export function isNavSessionStale(generation: number): boolean {
+  return generation !== state.navSessionGeneration;
+}
+
 export function setCurrentMedia(item: MediaItem | null): void {
   state.currentMedia = item;
   state.currentMediaId = item?.id ?? null;
@@ -144,90 +161,65 @@ export function setCurrentMedia(item: MediaItem | null): void {
 
 /** Direct jump (scan, restore, pick): browse history becomes [id], cursor 0. */
 export function resetHistory(id: number): void {
-  resetHistoryBag(browseBag(), id);
+  resetHistoryBag(browseHistoryBag(), id);
 }
 
 export function clearHistory(): void {
-  clearHistoryBag(browseBag());
+  clearHistoryBag(browseHistoryBag());
 }
 
 export function pushHistory(id: number): void {
-  pushHistoryBag(browseBag(), id);
+  pushHistoryBag(browseHistoryBag(), id);
 }
 
 export function peekHistoryBack(): number | null {
-  return peekBackBag(browseBag());
+  return peekBackBag(browseHistoryBag());
 }
 
 export function peekHistoryForward(): number | null {
-  return peekForwardBag(browseBag());
+  return peekForwardBag(browseHistoryBag());
 }
 
 export function commitHistoryBack(): void {
-  commitBackBag(browseBag());
+  commitBackBag(browseHistoryBag());
 }
 
 export function commitHistoryForward(): void {
-  commitForwardBag(browseBag());
+  commitForwardBag(browseHistoryBag());
 }
 
 export function unshiftHistory(id: number): void {
-  unshiftHistoryBag(browseBag(), id);
+  unshiftHistoryBag(browseHistoryBag(), id);
 }
 
 /** Drop a dead neighbor id; keeps current entry selected. */
 export function removeHistoryNeighbor(direction: "back" | "forward"): boolean {
-  return removeNeighborBag(browseBag(), direction);
-}
-
-// --- Active (browse or slideshow) history — used by nav next/prev ----------
-
-export function resetActiveHistory(id: number): void {
-  resetHistoryBag(activeHistoryBag(), id);
-}
-
-export function clearActiveHistory(): void {
-  clearHistoryBag(activeHistoryBag());
-}
-
-export function pushActiveHistory(id: number): void {
-  pushHistoryBag(activeHistoryBag(), id);
-}
-
-export function peekActiveHistoryBack(): number | null {
-  return peekBackBag(activeHistoryBag());
-}
-
-export function peekActiveHistoryForward(): number | null {
-  return peekForwardBag(activeHistoryBag());
-}
-
-export function commitActiveHistoryBack(): void {
-  commitBackBag(activeHistoryBag());
-}
-
-export function commitActiveHistoryForward(): void {
-  commitForwardBag(activeHistoryBag());
-}
-
-export function unshiftActiveHistory(id: number): void {
-  unshiftHistoryBag(activeHistoryBag(), id);
-}
-
-export function removeActiveHistoryNeighbor(
-  direction: "back" | "forward",
-): boolean {
-  return removeNeighborBag(activeHistoryBag(), direction);
+  return removeNeighborBag(browseHistoryBag(), direction);
 }
 
 // --- Slideshow history only ------------------------------------------------
 
 export function resetSlideshowHistory(id: number): void {
-  resetHistoryBag(slideshowBag(), id);
+  resetHistoryBag(slideshowHistoryBag(), id);
 }
 
 export function clearSlideshowHistory(): void {
-  clearHistoryBag(slideshowBag());
+  clearHistoryBag(slideshowHistoryBag());
+}
+
+/**
+ * After leaving slideshow, ensure browse history tip matches the displayed item
+ * so Prev/Next from Stop continue from current (without wiping the stack).
+ * Prefers push-if-not-at-cursor over resetHistory.
+ */
+export function reconcileBrowseHistoryWithCurrent(): void {
+  const id = state.currentMediaId;
+  if (id == null) return;
+  const atCursor =
+    state.historyCursor >= 0 && state.history[state.historyCursor] === id;
+  if (!atCursor) {
+    pushHistory(id);
+  }
 }
 
 export function isNavMode(value: unknown): value is NavMode {
