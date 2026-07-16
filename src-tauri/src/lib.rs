@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod scan;
+mod shell_open;
 
 use db::{db_health, open_and_migrate, DbState};
 use std::sync::Mutex;
@@ -37,6 +38,10 @@ pub fn run() {
             commands::remove_media_tag,
             commands::add_tag_asset,
             commands::remove_tag_asset,
+            shell_open::path_exists,
+            shell_open::open_with_default,
+            shell_open::open_with_vlc,
+            shell_open::open_parent_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

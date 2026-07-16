@@ -154,3 +154,21 @@ export async function removeTagAsset(assetId: number): Promise<void> {
 export function mediaUrl(absolutePath: string): string {
   return convertFileSrc(absolutePath);
 }
+
+// --- Shell open (default app / VLC / parent folder) --------------------------
+
+export async function pathExists(path: string): Promise<boolean> {
+  return invoke<boolean>("path_exists", { path });
+}
+
+export async function openWithDefault(path: string): Promise<void> {
+  return invoke("open_with_default", { path });
+}
+
+export async function openWithVlc(path: string): Promise<void> {
+  return invoke("open_with_vlc", { path });
+}
+
+export async function openParentFolder(path: string): Promise<void> {
+  return invoke("open_parent_folder", { path });
+}

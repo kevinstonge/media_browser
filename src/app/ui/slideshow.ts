@@ -216,6 +216,17 @@ export function onSlideshowSettingsChanged(): void {
   updateControls();
 }
 
+/** Space bar: start if idle, pause if playing, resume if paused. */
+export function toggleSlideshowPlayback(): void {
+  if (state.slideshowStatus === "idle") {
+    void startSlideshow();
+  } else if (state.slideshowStatus === "playing") {
+    pauseSlideshow();
+  } else if (state.slideshowStatus === "paused") {
+    resumeSlideshow();
+  }
+}
+
 function updateControls(): void {
   const status = state.slideshowStatus;
   if (startBtn) startBtn.hidden = status !== "idle";

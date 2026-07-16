@@ -1,14 +1,22 @@
 /**
- * Media stage: empty states, image, or video via asset protocol.
+ * Media stage: empty states, image/video via asset protocol, missing + decode errors
+ * with Open with default / VLC / parent folder actions.
  */
 
-import { mediaUrl, type MediaItem } from "../api";
+import { mediaUrl, pathExists, type MediaItem } from "../api";
 import { state, type StageEmptyReason } from "../state";
+import {
+  doOpenParentFolder,
+  doOpenWithDefault,
+  doOpenWithVlc,
+} from "./openWith";
 import { clearTagPresentation, onMediaDisplayed } from "./tags";
 
 let emptyEl: HTMLElement | null = null;
 let mediaHost: HTMLElement | null = null;
 let activeVideo: HTMLVideoElement | null = null;
+/** Path last shown in an error/missing card (for action buttons). */
+let errorPath: string | null = null;
 
 const EMPTY_COPY: Record<Exclude<StageEmptyReason, null>, { title: string; body: string }> = {
   no_root: {
@@ -42,6 +50,20 @@ export function mountStage(root: HTMLElement): void {
   mediaHost.className = "stage-media-host";
   root.appendChild(mediaHost);
 
+  // Error action buttons (event delegation — re-rendered HTML keeps working).
+  emptyEl.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const action = t.closest<HTMLElement>("[data-open-action]")?.dataset.openAction;
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const path = errorPath ?? state.currentMedia?.path ?? null;
+    if (action === "default") void doOpenWithDefault(path);
+    else if (action === "vlc") void doOpenWithVlc(path);
+    else if (action === "parent") void doOpenParentFolder(path);
+  });
+
   renderEmpty(state.stageEmpty ?? "no_root");
 }
 
@@ -60,6 +82,7 @@ function clearMedia(): void {
 
 function renderEmpty(reason: StageEmptyReason): void {
   if (!emptyEl) return;
+  errorPath = null;
   if (!reason) {
     emptyEl.hidden = true;
     emptyEl.innerHTML = "";
@@ -83,6 +106,67 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function openActionsHtml(opts: {
+  showDefault: boolean;
+  showVlc: boolean;
+  showParent: boolean;
+}): string {
+  const buttons: string[] = [];
+  if (opts.showDefault) {
+    buttons.push(
+      `<button type="button" class="stage-action-btn" data-open-action="default">Open with default</button>`,
+    );
+  }
+  if (opts.showVlc) {
+    buttons.push(
+      `<button type="button" class="stage-action-btn" data-open-action="vlc">Open with VLC</button>`,
+    );
+  }
+  if (opts.showParent) {
+    buttons.push(
+      `<button type="button" class="stage-action-btn stage-action-btn-secondary" data-open-action="parent">Open parent folder</button>`,
+    );
+  }
+  if (buttons.length === 0) return "";
+  return `<div class="stage-empty-actions nav-exclude">${buttons.join("")}</div>`;
+}
+
+function renderMissing(path: string, filename: string): void {
+  if (!emptyEl) return;
+  errorPath = path;
+  state.stageEmpty = "error";
+  emptyEl.hidden = false;
+  emptyEl.innerHTML = `
+    <div class="stage-empty-card stage-empty-card-actions">
+      <div class="stage-empty-title">File missing</div>
+      <div class="stage-empty-body">${escapeHtml(path || filename)}</div>
+      ${openActionsHtml({
+        showDefault: true,
+        showVlc: true,
+        showParent: true,
+      })}
+      <p class="stage-empty-hint">Open the parent folder, or Re-scan to soft-flag missing files (tags kept).</p>
+    </div>
+  `;
+}
+
+function renderDecodeError(path: string, filename: string, kind: "image" | "video"): void {
+  if (!emptyEl) return;
+  errorPath = path;
+  state.stageEmpty = "error";
+  emptyEl.hidden = false;
+  emptyEl.innerHTML = `
+    <div class="stage-empty-card stage-empty-card-actions">
+      <div class="stage-empty-title">${
+        kind === "video" ? "Could not play video" : "Could not load image"
+      }</div>
+      <div class="stage-empty-body">${escapeHtml(filename || path)}</div>
+      ${openActionsHtml({ showDefault: true, showVlc: true, showParent: false })}
+      <p class="stage-empty-hint">Try VLC or the system default player for this format.</p>
+    </div>
+  `;
+}
+
 /** Show empty stage (no root / no media / loading / error). */
 export function showEmpty(reason: StageEmptyReason): void {
   state.stageEmpty = reason;
@@ -104,21 +188,39 @@ export function showMedia(item: MediaItem): void {
   state.stageEmpty = null;
   renderEmpty(null);
   clearMedia();
+  errorPath = null;
+
+  // Soft-missing from DB, or confirm on disk before loading.
+  void presentMedia(item);
+}
+
+async function presentMedia(item: MediaItem): Promise<void> {
+  // If navigation moved on, abandon this load.
+  if (state.currentMediaId !== item.id) return;
 
   if (item.isMissing) {
-    showEmpty("error");
-    if (emptyEl) {
-      emptyEl.innerHTML = `
-        <div class="stage-empty-card">
-          <div class="stage-empty-title">File missing</div>
-          <div class="stage-empty-body">${escapeHtml(item.path)}</div>
-        </div>
-      `;
-      emptyEl.hidden = false;
-    }
+    clearMedia();
+    renderMissing(item.path, item.filename);
+    clearTagPresentation();
     return;
   }
 
+  let exists = true;
+  try {
+    exists = await pathExists(item.path);
+  } catch (err) {
+    console.warn("path_exists failed", err);
+  }
+  if (state.currentMediaId !== item.id) return;
+
+  if (!exists) {
+    clearMedia();
+    renderMissing(item.path, item.filename);
+    clearTagPresentation();
+    return;
+  }
+
+  if (!mediaHost) return;
   const url = mediaUrl(item.path);
   mediaHost.hidden = false;
 
@@ -130,16 +232,10 @@ export function showMedia(item: MediaItem): void {
     video.autoplay = true;
     video.playsInline = true;
     video.addEventListener("error", () => {
-      showEmpty("error");
-      if (emptyEl) {
-        emptyEl.innerHTML = `
-          <div class="stage-empty-card">
-            <div class="stage-empty-title">Could not play video</div>
-            <div class="stage-empty-body">${escapeHtml(item.filename)}</div>
-          </div>
-        `;
-        emptyEl.hidden = false;
-      }
+      if (state.currentMediaId !== item.id) return;
+      clearMedia();
+      renderDecodeError(item.path, item.filename, "video");
+      clearTagPresentation();
     });
     mediaHost.appendChild(video);
     activeVideo = video;
@@ -150,16 +246,10 @@ export function showMedia(item: MediaItem): void {
     img.draggable = false;
     img.src = url;
     img.addEventListener("error", () => {
-      showEmpty("error");
-      if (emptyEl) {
-        emptyEl.innerHTML = `
-          <div class="stage-empty-card">
-            <div class="stage-empty-title">Could not load image</div>
-            <div class="stage-empty-body">${escapeHtml(item.filename)}</div>
-          </div>
-        `;
-        emptyEl.hidden = false;
-      }
+      if (state.currentMediaId !== item.id) return;
+      clearMedia();
+      renderDecodeError(item.path, item.filename, "image");
+      clearTagPresentation();
     });
     mediaHost.appendChild(img);
   }

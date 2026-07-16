@@ -1,8 +1,11 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dbHealth } from "./app/api";
 import { handleNavKey, initNav, wireNavClicks } from "./app/nav";
+import { mountChrome } from "./app/ui/chrome";
+import { handleHelpKey, mountHelp } from "./app/ui/help";
+import { initOpenWith } from "./app/ui/openWith";
 import { mountSettings } from "./app/ui/settings";
-import { mountSlideshow } from "./app/ui/slideshow";
+import { mountSlideshow, toggleSlideshowPlayback } from "./app/ui/slideshow";
 import { mountStage } from "./app/ui/stage";
 import { mountTags } from "./app/ui/tags";
 
@@ -57,6 +60,9 @@ function wireKeyboard(): void {
       return;
     }
 
+    // Help overlay: `?` toggle; Esc closes help before leaving fullscreen.
+    if (handleHelpKey(e)) return;
+
     if (e.key === "F11") {
       e.preventDefault();
       void toggleFullscreen();
@@ -77,6 +83,13 @@ function wireKeyboard(): void {
       return;
     }
 
+    // Space: slideshow start / pause / resume (not when typing).
+    if (e.key === " " || e.code === "Space") {
+      e.preventDefault();
+      toggleSlideshowPlayback();
+      return;
+    }
+
     // Left / Right navigation
     if (handleNavKey(e)) return;
   });
@@ -84,6 +97,7 @@ function wireKeyboard(): void {
 
 async function init(): Promise<void> {
   initNav(setStatus);
+  initOpenWith(setStatus);
   wireKeyboard();
 
   const stageRoot = document.querySelector<HTMLElement>("#stage");
@@ -96,6 +110,8 @@ async function init(): Promise<void> {
     mountTags(appRoot, setStatus);
     mountSettings(appRoot, setStatus);
     mountSlideshow(appRoot, setStatus);
+    mountHelp(appRoot);
+    mountChrome(appRoot);
   }
 
   try {

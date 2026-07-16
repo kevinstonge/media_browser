@@ -36,6 +36,7 @@ import {
   state,
   type NavMode,
 } from "../state";
+import { doOpenWithDefault, doOpenWithVlc } from "./openWith";
 import { showEmpty } from "./stage";
 import { onSlideshowSettingsChanged, stopSlideshow } from "./slideshow";
 import {
@@ -107,6 +108,16 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
           aria-label="Slideshow duration in seconds"
         />
       </div>
+      <div class="settings-section-title">Open with…</div>
+      <div class="settings-row settings-row-actions settings-open-with">
+        <button type="button" class="settings-btn" id="settings-open-default" title="Open current file with the system default app">
+          Default app
+        </button>
+        <button type="button" class="settings-btn" id="settings-open-vlc" title="Open current file with VLC">
+          VLC
+        </button>
+      </div>
+      <p class="settings-hint">Opens the currently shown media file externally.</p>
       <div class="settings-section-title">Tags</div>
       <div class="settings-row">
         <input
@@ -120,7 +131,7 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
         <button type="button" class="settings-btn" id="settings-tag-create-btn">Create</button>
       </div>
       <div class="settings-tag-list" id="settings-tag-list" role="list"></div>
-      <p class="settings-hint" id="settings-hint">Left/Right arrows or click · Right-click = next</p>
+      <p class="settings-hint" id="settings-hint">←/→ or click · Right-click = next · Press ? for shortcuts</p>
     </div>
   `;
   root.appendChild(chrome);
@@ -136,6 +147,8 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   tagCreateInput = chrome.querySelector("#settings-tag-create");
   const tagCreateBtn = chrome.querySelector<HTMLButtonElement>("#settings-tag-create-btn");
   const browseBtn = chrome.querySelector<HTMLButtonElement>("#settings-browse");
+  const openDefaultBtn = chrome.querySelector<HTMLButtonElement>("#settings-open-default");
+  const openVlcBtn = chrome.querySelector<HTMLButtonElement>("#settings-open-vlc");
 
   setTagVocabularyListener(() => {
     void refreshTagManager();
@@ -147,6 +160,15 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
     if (panel && !panel.hidden) {
       void refreshTagManager();
     }
+  });
+
+  openDefaultBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void doOpenWithDefault(state.currentMedia?.path);
+  });
+  openVlcBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void doOpenWithVlc(state.currentMedia?.path);
   });
 
   tagCreateBtn?.addEventListener("click", (e) => {
