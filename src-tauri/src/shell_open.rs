@@ -1,7 +1,11 @@
 //! Open media with the system default app or VLC (Windows-first).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// CREATE_NO_WINDOW — hide console flashes for helper processes on Windows.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// True if the path exists on disk (file or directory).
 #[tauri::command]
@@ -54,8 +58,14 @@ pub fn open_with_vlc(path: String) -> Result<(), String> {
         "VLC not found — install VLC or use Open with default.".to_string()
     })?;
 
-    let status = Command::new(&vlc)
-        .arg(path)
+    let mut cmd = Command::new(&vlc);
+    cmd.arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_no_window(&mut cmd);
+
+    let status = cmd
         .spawn()
         .map_err(|e| format!("failed to launch VLC ({}): {e}", vlc.display()))?;
 
@@ -69,11 +79,17 @@ fn open_path_default(path: &Path) -> Result<(), String> {
     {
         // `cmd /C start "" <path>` — empty title arg is required so paths with
         // spaces / leading quotes are not mis-parsed as the window title.
-        let status = Command::new("cmd")
-            .arg("/C")
+        // CREATE_NO_WINDOW avoids a brief console flash from cmd.exe.
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C")
             .arg("start")
             .arg("")
             .arg(path.as_os_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_no_window(&mut cmd);
+        let status = cmd
             .spawn()
             .map_err(|e| format!("open with default failed: {e}"))?;
         drop(status);
@@ -92,6 +108,16 @@ fn open_path_default(path: &Path) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// Hide console windows for helper / detached GUI launches on Windows.
+#[cfg(windows)]
+fn apply_no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn apply_no_window(_cmd: &mut Command) {}
 
 fn find_vlc() -> Option<PathBuf> {
     // 1. `vlc` on PATH
@@ -117,7 +143,13 @@ fn find_vlc() -> Option<PathBuf> {
 fn find_vlc_on_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let output = Command::new("where").arg("vlc").output().ok()?;
+        let mut cmd = Command::new("where");
+        cmd.arg("vlc")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        apply_no_window(&mut cmd);
+        let output = cmd.output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -206,10 +238,13 @@ fn vlc_from_registry() -> Option<PathBuf> {
 /// Minimal `reg query` helper — avoids a winreg dependency for one read.
 #[cfg(windows)]
 fn reg_query_value(key: &str, value_name: &str) -> Option<String> {
-    let output = Command::new("reg")
-        .args(["query", key, "/v", value_name])
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("reg");
+    cmd.args(["query", key, "/v", value_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    apply_no_window(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }

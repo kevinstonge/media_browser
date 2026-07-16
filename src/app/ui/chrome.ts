@@ -5,7 +5,7 @@
 
 /** Padded hit regions + overlay roots that must not trigger stage navigation. */
 export const CHROME_SELECTORS =
-  ".settings-chrome, .slideshow-chrome, .tags-chrome, .help-overlay, .stage-empty-actions, .nav-exclude";
+  ".settings-chrome, .slideshow-chrome, .tags-chrome, .help-overlay, .stage-empty-actions, .stage-empty-card-actions, .nav-exclude";
 
 /** Returns true if the element (or an ancestor) is a nav-excluded chrome region. */
 export function isOverChrome(target: EventTarget | null): boolean {

@@ -44,7 +44,7 @@ import {
 } from "./state";
 import { isOverChrome } from "./ui/chrome";
 import { showMedia } from "./ui/stage";
-import { onMediaDisplayed } from "./ui/tags";
+import { clearTagPresentation, onMediaDisplayed } from "./ui/tags";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
@@ -94,11 +94,30 @@ function persistLastMediaId(id: number | null): Promise<void> {
   return lastMediaWriteQueue;
 }
 
+/**
+ * Apply tag panel / badges after stage knows whether the file is present.
+ * Disk-missing (not soft-flagged) is treated like isMissing for badges/sounds.
+ */
+function applyTagsAfterPresent(
+  item: MediaItem,
+  present: "ready" | "missing" | "aborted",
+): void {
+  if (present === "aborted") return;
+  if (present === "missing") {
+    // Panel still editable; badges/sounds only when file is on disk.
+    onMediaDisplayed({ ...item, isMissing: true });
+    return;
+  }
+  onMediaDisplayed(item);
+}
+
 /** Show an item already resolved from DB; does not touch history. */
 export async function displayMedia(item: MediaItem): Promise<void> {
   setCurrentMedia(item);
-  showMedia(item);
-  onMediaDisplayed(item);
+  // Stop previous badges/sounds immediately; wait for path check before new ones.
+  clearTagPresentation();
+  const present = await showMedia(item);
+  applyTagsAfterPresent(item, present);
   flashStatus(item.filename);
   // Await so navigating gate covers the write; queue keeps latest id wins.
   await persistLastMediaId(item.id);
@@ -120,8 +139,13 @@ async function displayMediaForNav(
   if (isNavSessionStale(generation)) return false;
 
   setCurrentMedia(item);
-  showMedia(item);
-  onMediaDisplayed(item);
+  clearTagPresentation();
+  const present = await showMedia(item);
+  if (isNavSessionStale(generation)) {
+    // Stage may have applied media for a now-stale session; abandon tag apply.
+    return false;
+  }
+  applyTagsAfterPresent(item, present);
   flashStatus(item.filename);
   await persistLastMediaId(item.id);
 

@@ -18,6 +18,9 @@ let activeVideo: HTMLVideoElement | null = null;
 /** Path last shown in an error/missing card (for action buttons). */
 let errorPath: string | null = null;
 
+/** Outcome of presenting media (for tag badges/sounds sequencing). */
+export type PresentResult = "ready" | "missing" | "aborted";
+
 const EMPTY_COPY: Record<Exclude<StageEmptyReason, null>, { title: string; body: string }> = {
   no_root: {
     title: "No folder selected",
@@ -62,6 +65,19 @@ export function mountStage(root: HTMLElement): void {
     if (action === "default") void doOpenWithDefault(path);
     else if (action === "vlc") void doOpenWithVlc(path);
     else if (action === "parent") void doOpenParentFolder(path);
+  });
+
+  // Clicks on the empty/error card must not bubble to stage nav (left/right).
+  emptyEl.addEventListener("click", (e) => {
+    if (e.target instanceof Element && e.target.closest(".stage-empty-card-actions")) {
+      e.stopPropagation();
+    }
+  });
+  emptyEl.addEventListener("contextmenu", (e) => {
+    if (e.target instanceof Element && e.target.closest(".stage-empty-card-actions")) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
   });
 
   renderEmpty(state.stageEmpty ?? "no_root");
@@ -136,13 +152,15 @@ function renderMissing(path: string, filename: string): void {
   errorPath = path;
   state.stageEmpty = "error";
   emptyEl.hidden = false;
+  // PLAN §10.2: missing → message + path + parent folder only (no default/VLC —
+  // those require the file on disk and would hard-fail).
   emptyEl.innerHTML = `
-    <div class="stage-empty-card stage-empty-card-actions">
+    <div class="stage-empty-card stage-empty-card-actions nav-exclude">
       <div class="stage-empty-title">File missing</div>
       <div class="stage-empty-body">${escapeHtml(path || filename)}</div>
       ${openActionsHtml({
-        showDefault: true,
-        showVlc: true,
+        showDefault: false,
+        showVlc: false,
         showParent: true,
       })}
       <p class="stage-empty-hint">Open the parent folder, or Re-scan to soft-flag missing files (tags kept).</p>
@@ -156,7 +174,7 @@ function renderDecodeError(path: string, filename: string, kind: "image" | "vide
   state.stageEmpty = "error";
   emptyEl.hidden = false;
   emptyEl.innerHTML = `
-    <div class="stage-empty-card stage-empty-card-actions">
+    <div class="stage-empty-card stage-empty-card-actions nav-exclude">
       <div class="stage-empty-title">${
         kind === "video" ? "Could not play video" : "Could not load image"
       }</div>
@@ -172,7 +190,7 @@ export function showEmpty(reason: StageEmptyReason): void {
   state.stageEmpty = reason;
   clearMedia();
   renderEmpty(reason);
-  // ISSUE-3: only wipe the tag editor when there is no current media.
+  // only wipe the tag editor when there is no current media.
   // Decode/load errors keep currentMediaId set — stop sounds + clear badges,
   // but leave the per-item tag panel so add/remove still works.
   if (state.currentMediaId == null) {
@@ -182,27 +200,33 @@ export function showEmpty(reason: StageEmptyReason): void {
   }
 }
 
-/** Load and display a media item (image or video). */
-export function showMedia(item: MediaItem): void {
-  if (!mediaHost) return;
+/**
+ * Load and display a media item (image or video).
+ * Awaits disk existence check so callers can sequence tag badges/sounds.
+ *
+ * @returns `"ready"` when media element is mounted, `"missing"` when the file
+ *   is soft-missing or gone on disk, `"aborted"` if navigation moved on.
+ */
+export async function showMedia(item: MediaItem): Promise<PresentResult> {
+  if (!mediaHost) return "aborted";
   state.stageEmpty = null;
   renderEmpty(null);
   clearMedia();
   errorPath = null;
 
   // Soft-missing from DB, or confirm on disk before loading.
-  void presentMedia(item);
+  return presentMedia(item);
 }
 
-async function presentMedia(item: MediaItem): Promise<void> {
+async function presentMedia(item: MediaItem): Promise<PresentResult> {
   // If navigation moved on, abandon this load.
-  if (state.currentMediaId !== item.id) return;
+  if (state.currentMediaId !== item.id) return "aborted";
 
   if (item.isMissing) {
     clearMedia();
     renderMissing(item.path, item.filename);
     clearTagPresentation();
-    return;
+    return "missing";
   }
 
   let exists = true;
@@ -211,16 +235,16 @@ async function presentMedia(item: MediaItem): Promise<void> {
   } catch (err) {
     console.warn("path_exists failed", err);
   }
-  if (state.currentMediaId !== item.id) return;
+  if (state.currentMediaId !== item.id) return "aborted";
 
   if (!exists) {
     clearMedia();
     renderMissing(item.path, item.filename);
     clearTagPresentation();
-    return;
+    return "missing";
   }
 
-  if (!mediaHost) return;
+  if (!mediaHost) return "aborted";
   const url = mediaUrl(item.path);
   mediaHost.hidden = false;
 
@@ -253,4 +277,5 @@ async function presentMedia(item: MediaItem): Promise<void> {
     });
     mediaHost.appendChild(img);
   }
+  return "ready";
 }
