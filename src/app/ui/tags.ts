@@ -35,6 +35,8 @@ let allTags: Tag[] = [];
 /** Bumped when media changes so in-flight sound queues abort. */
 let soundGeneration = 0;
 let activeAudio: HTMLAudioElement | null = null;
+/** Completes the in-flight playOneSound Promise (explicit cancel). */
+let soundDone: (() => void) | null = null;
 
 /** Optional listener when global tag vocabulary changes (settings refresh). */
 let vocabularyListener: (() => void) | null = null;
@@ -135,25 +137,38 @@ export async function refreshVocabulary(): Promise<void> {
 }
 
 /**
- * Called whenever the displayed media changes (or clears).
- * Stops sound queue, clears badges, loads item tags.
+ * Stop tag-sound queue and clear badge strip only.
+ * Leaves the per-item tag editor panel intact (load errors, soft-missing).
+ */
+export function clearTagPresentation(): void {
+  stopTagSounds();
+  clearBadges();
+}
+
+/**
+ * Called whenever the displayed media changes (or fully clears).
+ * Stops sound queue, clears badges, loads item tags into the panel.
+ *
+ * Soft-missing items still show/edit tags (associations live in DB).
+ * Badge images + sounds only play when the file is not missing.
  */
 export function onMediaDisplayed(item: MediaItem | null): void {
   stopTagSounds();
   clearBadges();
 
-  if (!item || item.isMissing) {
+  if (!item) {
     itemTags = [];
     renderTagList();
     renderAddDropdown();
     return;
   }
 
-  // Prefer tags from get_media payload; fall back to empty.
   itemTags = item.tags ? [...item.tags] : [];
   renderTagList();
   renderAddDropdown();
-  showBadgesAndPlaySounds(itemTags);
+  if (!item.isMissing) {
+    showBadgesAndPlaySounds(itemTags);
+  }
 }
 
 /** Re-sync after settings mutates tag assets for tags on current item. */
@@ -188,6 +203,12 @@ function stopTagSounds(): void {
       /* ignore */
     }
     activeAudio = null;
+  }
+  // Explicitly settle the in-flight playOneSound Promise (ISSUE-2).
+  if (soundDone) {
+    const finish = soundDone;
+    soundDone = null;
+    finish();
   }
 }
 
@@ -246,14 +267,23 @@ function playOneSound(path: string, gen: number): Promise<void> {
     }
     const audio = new Audio(mediaUrl(path));
     activeAudio = audio;
+    let settled = false;
     const done = () => {
+      if (settled) return;
+      settled = true;
       if (activeAudio === audio) activeAudio = null;
+      if (soundDone === done) soundDone = null;
       audio.removeEventListener("ended", done);
       audio.removeEventListener("error", done);
+      audio.removeEventListener("abort", done);
+      audio.removeEventListener("emptied", done);
       resolve();
     };
+    soundDone = done;
     audio.addEventListener("ended", done);
     audio.addEventListener("error", done);
+    audio.addEventListener("abort", done);
+    audio.addEventListener("emptied", done);
     void audio.play().catch(() => done());
   });
 }
@@ -327,6 +357,23 @@ function renderAddDropdown(): void {
   addBtn.disabled = true;
 }
 
+/** True when UI mutations still target the media we started the mutation for. */
+function stillOnMedia(mediaId: number): boolean {
+  return state.currentMediaId === mediaId;
+}
+
+function applyItemTagsLocally(tags: Tag[]): void {
+  itemTags = tags;
+  if (state.currentMedia) state.currentMedia.tags = [...itemTags];
+  renderTagList();
+  renderAddDropdown();
+  stopTagSounds();
+  clearBadges();
+  if (!state.currentMedia?.isMissing) {
+    showBadgesAndPlaySounds(itemTags);
+  }
+}
+
 async function onAddSelected(): Promise<void> {
   const mediaId = state.currentMediaId;
   const tagId = Number(selectEl?.value);
@@ -334,19 +381,15 @@ async function onAddSelected(): Promise<void> {
 
   try {
     const tag = await addMediaTag(mediaId, tagId);
-    if (!itemTags.some((t) => t.id === tag.id)) {
-      itemTags.push(tag);
-      itemTags.sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-      );
-    }
-    if (state.currentMedia) state.currentMedia.tags = [...itemTags];
-    renderTagList();
-    renderAddDropdown();
-    // Refresh badges/sounds for updated set
-    stopTagSounds();
-    clearBadges();
-    showBadgesAndPlaySounds(itemTags);
+    // ISSUE-1: user may have navigated away during the await.
+    if (!stillOnMedia(mediaId)) return;
+
+    const next = itemTags.some((t) => t.id === tag.id)
+      ? itemTags
+      : [...itemTags, tag].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        );
+    applyItemTagsLocally(next);
   } catch (err) {
     setStatus(`Add tag failed: ${formatErr(err)}`, true);
   }
@@ -358,13 +401,9 @@ async function onRemoveTag(tagId: number): Promise<void> {
 
   try {
     await removeMediaTag(mediaId, tagId);
-    itemTags = itemTags.filter((t) => t.id !== tagId);
-    if (state.currentMedia) state.currentMedia.tags = [...itemTags];
-    renderTagList();
-    renderAddDropdown();
-    stopTagSounds();
-    clearBadges();
-    showBadgesAndPlaySounds(itemTags);
+    if (!stillOnMedia(mediaId)) return;
+
+    applyItemTagsLocally(itemTags.filter((t) => t.id !== tagId));
   } catch (err) {
     setStatus(`Remove tag failed: ${formatErr(err)}`, true);
   }
@@ -374,39 +413,46 @@ async function onCreateAndAdd(): Promise<void> {
   const name = createInput?.value.trim() ?? "";
   if (!name) return;
 
+  // Capture before any await so attach targets the item the user acted on.
+  const mediaId = state.currentMediaId;
+
   try {
     const tag = await createTag(name);
-    // Refresh vocabulary (settings list too)
+    // Vocabulary always updates (global), even if media changed mid-flight.
     if (!allTags.some((t) => t.id === tag.id)) {
       allTags.push(tag);
       allTags.sort((a, b) =>
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
       );
     } else {
-      // Merge name if re-fetched case differs
       allTags = allTags.map((t) => (t.id === tag.id ? tag : t));
     }
     notifyVocabularyChanged();
 
     if (createInput) createInput.value = "";
 
-    const mediaId = state.currentMediaId;
-    if (mediaId != null) {
+    if (mediaId != null && stillOnMedia(mediaId)) {
       if (!itemTags.some((t) => t.id === tag.id)) {
         const attached = await addMediaTag(mediaId, tag.id);
-        itemTags.push(attached);
-        itemTags.sort((a, b) =>
+        if (!stillOnMedia(mediaId)) {
+          renderAddDropdown();
+          setStatus(`Tag “${tag.name}” ready`, true);
+          window.setTimeout(() => setStatus("", false), 2000);
+          return;
+        }
+        const next = [...itemTags, attached].sort((a, b) =>
           a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
         );
-        if (state.currentMedia) state.currentMedia.tags = [...itemTags];
-        stopTagSounds();
-        clearBadges();
-        showBadgesAndPlaySounds(itemTags);
+        applyItemTagsLocally(next);
+      } else {
+        renderTagList();
+        renderAddDropdown();
       }
+    } else {
+      // No media, or navigated away: just refresh dropdown from new vocab.
+      renderAddDropdown();
     }
 
-    renderTagList();
-    renderAddDropdown();
     setStatus(`Tag “${tag.name}” ready`, true);
     window.setTimeout(() => setStatus("", false), 2000);
   } catch (err) {
