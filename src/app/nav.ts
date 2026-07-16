@@ -1,6 +1,10 @@
 /**
  * Navigation: next/prev with alpha | random modes and session history.
  *
+ * While slideshow is active (playing or paused), next/prev use slideshow
+ * nav mode + slideshow history. Manual steps notify the slideshow timer
+ * so the duration clock resets.
+ *
  * Inputs: Right = next, Left = prev; right-click = next, left-click = prev.
  * Clicks over chrome / form controls / video do not fire left-click prev.
  */
@@ -13,17 +17,19 @@ import {
   type MediaItem,
 } from "./api";
 import {
-  commitHistoryBack,
-  commitHistoryForward,
+  activeNavMode,
+  commitActiveHistoryBack,
+  commitActiveHistoryForward,
   isNavMode,
-  peekHistoryBack,
-  peekHistoryForward,
-  pushHistory,
-  removeHistoryNeighbor,
+  isSlideshowActive,
+  peekActiveHistoryBack,
+  peekActiveHistoryForward,
+  pushActiveHistory,
+  removeActiveHistoryNeighbor,
   resetHistory,
   setCurrentMedia,
   state,
-  unshiftHistory,
+  unshiftActiveHistory,
   type NavMode,
 } from "./state";
 import { isOverChrome } from "./ui/chrome";
@@ -34,12 +40,28 @@ export type StatusFn = (message: string, visible?: boolean) => void;
 let setStatus: StatusFn = () => {};
 let statusClearTimer: number | null = null;
 
+/** Fired after a successful next/prev step (for slideshow timer reset). */
+let onNavStepListener: (() => void) | null = null;
+
 /** Serialized last_media_id writes — always flush the latest id. */
 let lastMediaWriteQueue: Promise<void> = Promise.resolve();
 let latestLastMediaId: number | null = null;
 
 export function initNav(statusFn: StatusFn): void {
   setStatus = statusFn;
+}
+
+/** Slideshow registers this to reset the duration clock on manual next/prev. */
+export function setNavStepListener(fn: (() => void) | null): void {
+  onNavStepListener = fn;
+}
+
+function notifyNavStep(): void {
+  try {
+    onNavStepListener?.();
+  } catch (err) {
+    console.warn("nav step listener failed", err);
+  }
 }
 
 function flashStatus(message: string, ms = 2500): void {
@@ -70,7 +92,7 @@ export async function displayMedia(item: MediaItem): Promise<void> {
   await persistLastMediaId(item.id);
 }
 
-/** Direct jump: reset history to [id] and show. */
+/** Direct jump: reset browse history to [id] and show. */
 export async function jumpToMedia(item: MediaItem): Promise<void> {
   resetHistory(item.id);
   await displayMedia(item);
@@ -97,7 +119,8 @@ async function pickRandomNext(): Promise<MediaItem | null> {
   const root = state.root;
   if (!root) return null;
   const excludeId = state.currentMediaId;
-  if (state.navMode === "random_current_dir") {
+  const mode = activeNavMode();
+  if (mode === "random_current_dir") {
     const parent = state.currentMedia?.parentDir ?? null;
     return getRandom(root.id, parent, excludeId);
   }
@@ -105,7 +128,7 @@ async function pickRandomNext(): Promise<MediaItem | null> {
 }
 
 /**
- * Walk history in direction: peek → load → commit on success.
+ * Walk active history in direction: peek → load → commit on success.
  * Dead (null) ids are spliced out and the walk retries so Prev/Next cannot stick.
  * Transient IPC errors stop without mutating history.
  *
@@ -117,7 +140,9 @@ async function walkHistory(
   let skipped = 0;
   while (true) {
     const id =
-      direction === "back" ? peekHistoryBack() : peekHistoryForward();
+      direction === "back"
+        ? peekActiveHistoryBack()
+        : peekActiveHistoryForward();
     if (id == null) {
       if (skipped > 0) {
         flashStatus(
@@ -134,14 +159,14 @@ async function walkHistory(
       const item = await getMedia(id);
       if (!item) {
         // Hard-deleted / gone row — drop slot and retry next neighbor.
-        if (!removeHistoryNeighbor(direction)) {
+        if (!removeActiveHistoryNeighbor(direction)) {
           return "exhausted";
         }
         skipped += 1;
         continue;
       }
-      if (direction === "back") commitHistoryBack();
-      else commitHistoryForward();
+      if (direction === "back") commitActiveHistoryBack();
+      else commitActiveHistoryForward();
       await displayMedia(item);
       if (skipped > 0) {
         // Brief note; displayMedia also flashes filename.
@@ -156,22 +181,28 @@ async function walkHistory(
   }
 }
 
-/** Next item per nav mode + history rules. */
+/** Next item per active nav mode + history rules. */
 export async function goNext(): Promise<void> {
   if (!canNavigate() || state.currentMediaId == null) return;
 
   state.navigating = true;
   try {
+    const mode = activeNavMode();
+
     // Random modes: replay forward history when not at tip (peek, then commit).
     // Dead ids are pruned so we never stick on a missing slot.
-    if (state.navMode !== "alpha") {
+    if (mode !== "alpha") {
       const result = await walkHistory("forward");
-      if (result === "loaded" || result === "error") return;
+      if (result === "loaded") {
+        notifyNavStep();
+        return;
+      }
+      if (result === "error") return;
       // exhausted → pick a new random item below
     }
 
     let item: MediaItem | null = null;
-    if (state.navMode === "alpha") {
+    if (mode === "alpha") {
       item = await getNeighbor(state.currentMediaId, "next");
     } else {
       item = await pickRandomNext();
@@ -181,12 +212,15 @@ export async function goNext(): Promise<void> {
 
     // Single-item library / same id: keep history stable, skip media rebuild.
     if (item.id === state.currentMediaId) {
-      pushHistory(item.id);
+      pushActiveHistory(item.id);
+      // Still reset the slideshow clock so the user sees a full duration.
+      notifyNavStep();
       return;
     }
 
-    pushHistory(item.id);
+    pushActiveHistory(item.id);
     await displayMedia(item);
+    notifyNavStep();
   } catch (err) {
     console.error("goNext failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
@@ -201,11 +235,16 @@ export async function goPrev(): Promise<void> {
 
   state.navigating = true;
   try {
+    const mode = activeNavMode();
     const result = await walkHistory("back");
-    if (result === "loaded" || result === "error") return;
+    if (result === "loaded") {
+      notifyNavStep();
+      return;
+    }
+    if (result === "error") return;
     // exhausted history — alpha can still SQL-prev; random stays at first entry
 
-    if (state.navMode !== "alpha") {
+    if (mode !== "alpha") {
       return;
     }
 
@@ -214,12 +253,14 @@ export async function goPrev(): Promise<void> {
 
     if (item.id === state.currentMediaId) {
       // Single-item wrap — no DOM rebuild.
-      unshiftHistory(item.id);
+      unshiftActiveHistory(item.id);
+      notifyNavStep();
       return;
     }
 
-    unshiftHistory(item.id);
+    unshiftActiveHistory(item.id);
     await displayMedia(item);
+    notifyNavStep();
   } catch (err) {
     console.error("goPrev failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
@@ -234,6 +275,28 @@ export async function setNavMode(mode: NavMode): Promise<void> {
     await settingsSet("nav_mode", JSON.stringify(mode));
   } catch (err) {
     console.warn("persist nav_mode failed", err);
+  }
+}
+
+export async function setSlideshowNavMode(mode: NavMode): Promise<void> {
+  state.slideshowNavMode = mode;
+  try {
+    await settingsSet("slideshow_nav_mode", JSON.stringify(mode));
+  } catch (err) {
+    console.warn("persist slideshow_nav_mode failed", err);
+  }
+}
+
+export async function setSlideshowDurationSec(seconds: number): Promise<void> {
+  state.slideshowDurationSec = seconds;
+  try {
+    await settingsSet("slideshow_duration_sec", JSON.stringify(seconds));
+  } catch (err) {
+    console.warn("persist slideshow_duration_sec failed", err);
+  }
+  // Duration change while playing: reschedule from full new duration.
+  if (isSlideshowActive()) {
+    notifyNavStep();
   }
 }
 

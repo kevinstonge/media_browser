@@ -1,5 +1,5 @@
 /**
- * Settings overlay: folder path, Scan / Re-scan, nav mode.
+ * Settings overlay: folder path, Scan / Re-scan, browse + slideshow nav modes, duration.
  */
 
 import {
@@ -13,9 +13,23 @@ import {
   type MediaItem,
   type RootInfo,
 } from "../api";
-import { jumpToMedia, parseNavMode, setNavMode } from "../nav";
-import { clearHistory, setCurrentMedia, state, type NavMode } from "../state";
+import {
+  jumpToMedia,
+  parseNavMode,
+  setNavMode,
+  setSlideshowDurationSec,
+  setSlideshowNavMode,
+} from "../nav";
+import {
+  clampSlideshowDurationSec,
+  clearHistory,
+  DEFAULT_SLIDESHOW_DURATION_SEC,
+  setCurrentMedia,
+  state,
+  type NavMode,
+} from "../state";
 import { showEmpty } from "./stage";
+import { onSlideshowSettingsChanged, stopSlideshow } from "./slideshow";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
@@ -25,6 +39,14 @@ let pathEl: HTMLElement | null = null;
 let scanBtn: HTMLButtonElement | null = null;
 let gearBtn: HTMLButtonElement | null = null;
 let navModeSelect: HTMLSelectElement | null = null;
+let slideshowNavModeSelect: HTMLSelectElement | null = null;
+let slideshowDurationInput: HTMLInputElement | null = null;
+
+const NAV_MODE_OPTIONS = `
+  <option value="alpha">Alphabetical</option>
+  <option value="random_root">Random (whole library)</option>
+  <option value="random_current_dir">Random (current folder)</option>
+`;
 
 export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   setStatus = statusFn;
@@ -47,10 +69,27 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
       <label class="settings-label" for="settings-nav-mode">Default mode — next item shows</label>
       <div class="settings-row">
         <select class="settings-select" id="settings-nav-mode" aria-label="Navigation mode">
-          <option value="alpha">Alphabetical</option>
-          <option value="random_root">Random (whole library)</option>
-          <option value="random_current_dir">Random (current folder)</option>
+          ${NAV_MODE_OPTIONS}
         </select>
+      </div>
+      <label class="settings-label" for="settings-slideshow-nav-mode">Slideshow — next item shows</label>
+      <div class="settings-row">
+        <select class="settings-select" id="settings-slideshow-nav-mode" aria-label="Slideshow navigation mode">
+          ${NAV_MODE_OPTIONS}
+        </select>
+      </div>
+      <label class="settings-label" for="settings-slideshow-duration">Slideshow duration (seconds)</label>
+      <div class="settings-row">
+        <input
+          type="number"
+          class="settings-input"
+          id="settings-slideshow-duration"
+          min="1"
+          max="3600"
+          step="1"
+          value="${DEFAULT_SLIDESHOW_DURATION_SEC}"
+          aria-label="Slideshow duration in seconds"
+        />
       </div>
       <p class="settings-hint" id="settings-hint">Left/Right arrows or click · Right-click = next</p>
     </div>
@@ -62,6 +101,8 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   pathEl = chrome.querySelector("#settings-path");
   scanBtn = chrome.querySelector("#settings-scan");
   navModeSelect = chrome.querySelector("#settings-nav-mode");
+  slideshowNavModeSelect = chrome.querySelector("#settings-slideshow-nav-mode");
+  slideshowDurationInput = chrome.querySelector("#settings-slideshow-duration");
   const browseBtn = chrome.querySelector<HTMLButtonElement>("#settings-browse");
 
   gearBtn?.addEventListener("click", (e) => {
@@ -86,6 +127,25 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
     window.setTimeout(() => setStatus("", false), 2000);
   });
 
+  slideshowNavModeSelect?.addEventListener("change", () => {
+    const value = slideshowNavModeSelect?.value as NavMode;
+    void setSlideshowNavMode(value);
+    onSlideshowSettingsChanged();
+    setStatus(`Slideshow mode: ${labelForMode(value)}`, true);
+    window.setTimeout(() => setStatus("", false), 2000);
+  });
+
+  slideshowDurationInput?.addEventListener("change", () => {
+    void onDurationChange();
+  });
+  slideshowDurationInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void onDurationChange();
+      (e.target as HTMLInputElement).blur();
+    }
+  });
+
   // Keep panel open when interacting inside it
   panel?.addEventListener("click", (e) => e.stopPropagation());
 
@@ -100,12 +160,22 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   void bootstrap();
 }
 
+async function onDurationChange(): Promise<void> {
+  if (!slideshowDurationInput) return;
+  const clamped = clampSlideshowDurationSec(slideshowDurationInput.value);
+  slideshowDurationInput.value = String(clamped);
+  await setSlideshowDurationSec(clamped);
+  onSlideshowSettingsChanged();
+  setStatus(`Slideshow duration: ${clamped}s`, true);
+  window.setTimeout(() => setStatus("", false), 2000);
+}
+
 async function bootstrap(): Promise<void> {
-  await loadNavMode();
+  await loadSettings();
   await restoreLastRoot();
 }
 
-async function loadNavMode(): Promise<void> {
+async function loadSettings(): Promise<void> {
   try {
     const raw = await settingsGet("nav_mode");
     const mode = parseNavMode(raw);
@@ -115,6 +185,38 @@ async function loadNavMode(): Promise<void> {
     console.warn("load nav_mode failed", err);
     state.navMode = "alpha";
     if (navModeSelect) navModeSelect.value = "alpha";
+  }
+
+  try {
+    const raw = await settingsGet("slideshow_nav_mode");
+    const mode = parseNavMode(raw);
+    state.slideshowNavMode = mode;
+    if (slideshowNavModeSelect) slideshowNavModeSelect.value = mode;
+  } catch (err) {
+    console.warn("load slideshow_nav_mode failed", err);
+    state.slideshowNavMode = "alpha";
+    if (slideshowNavModeSelect) slideshowNavModeSelect.value = "alpha";
+  }
+
+  try {
+    const raw = await settingsGet("slideshow_duration_sec");
+    let value: unknown = raw;
+    if (raw != null) {
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        value = raw;
+      }
+    }
+    const sec = clampSlideshowDurationSec(value ?? DEFAULT_SLIDESHOW_DURATION_SEC);
+    state.slideshowDurationSec = sec;
+    if (slideshowDurationInput) slideshowDurationInput.value = String(sec);
+  } catch (err) {
+    console.warn("load slideshow_duration_sec failed", err);
+    state.slideshowDurationSec = DEFAULT_SLIDESHOW_DURATION_SEC;
+    if (slideshowDurationInput) {
+      slideshowDurationInput.value = String(DEFAULT_SLIDESHOW_DURATION_SEC);
+    }
   }
 }
 
@@ -151,12 +253,14 @@ async function restoreLastRoot(): Promise<void> {
     state.root = root;
     updatePathDisplay(root);
     if (!root) {
+      stopSlideshow();
       clearHistory();
       setCurrentMedia(null);
       showEmpty("no_root");
       return;
     }
     if (root.itemCount === 0) {
+      stopSlideshow();
       clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
@@ -173,6 +277,7 @@ async function restoreLastRoot(): Promise<void> {
     // Prefer last_media_id when still in this root; else first alpha item.
     const item = await resolveStartupMedia(root);
     if (!item) {
+      stopSlideshow();
       clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
@@ -181,6 +286,7 @@ async function restoreLastRoot(): Promise<void> {
     await jumpToMedia(item);
   } catch (err) {
     console.error(err);
+    stopSlideshow();
     clearHistory();
     setCurrentMedia(null);
     showEmpty("no_root");
@@ -228,6 +334,7 @@ async function onBrowse(): Promise<void> {
     };
     updatePathDisplay(state.root);
     if (!samePath) {
+      stopSlideshow();
       clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
@@ -247,6 +354,7 @@ async function onScan(): Promise<void> {
     ? { ...state.currentMedia }
     : null;
 
+  stopSlideshow();
   state.scanning = true;
   if (scanBtn) {
     scanBtn.disabled = true;

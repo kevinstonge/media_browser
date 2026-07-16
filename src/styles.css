@@ -299,3 +299,93 @@ body {
 .stage {
   cursor: default;
 }
+
+/* ---- Slideshow chrome (hover-reveal, bottom-right) ---- */
+
+.slideshow-chrome {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  z-index: 30;
+  /* padded hit region ~10px */
+  padding: 10px;
+}
+
+.slideshow-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: transparent;
+  opacity: 0.25;
+  transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.slideshow-chrome:hover .slideshow-bar,
+.slideshow-chrome:focus-within .slideshow-bar {
+  opacity: 1;
+  background: rgba(22, 22, 24, 0.92);
+  border: 1px solid #333;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.slideshow-status {
+  font-size: 0.72rem;
+  color: #9ab;
+  min-width: 0;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.slideshow-status:empty {
+  display: none;
+}
+
+.slideshow-btn {
+  border: 1px solid #444;
+  background: #2a2a2e;
+  color: #eee;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.slideshow-btn:hover:not(:disabled) {
+  background: #3a3a40;
+  border-color: #666;
+}
+
+.slideshow-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.slideshow-btn[hidden] {
+  display: none;
+}
+
+.settings-input {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #eee;
+}
+
+.settings-input:hover,
+.settings-input:focus {
+  border-color: #555;
+  outline: none;
+}
+
+.settings-input:focus-visible {
+  border-color: #5a8ad0;
+  box-shadow: 0 0 0 2px rgba(90, 138, 208, 0.35);
+}

@@ -2,6 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dbHealth } from "./app/api";
 import { handleNavKey, initNav, wireNavClicks } from "./app/nav";
 import { mountSettings } from "./app/ui/settings";
+import { mountSlideshow } from "./app/ui/slideshow";
 import { mountStage } from "./app/ui/stage";
 
 const appWindow = getCurrentWindow();
@@ -92,6 +93,7 @@ async function init(): Promise<void> {
   }
   if (appRoot) {
     mountSettings(appRoot, setStatus);
+    mountSlideshow(appRoot, setStatus);
   }
 
   try {
