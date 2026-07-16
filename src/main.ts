@@ -4,6 +4,7 @@ import { handleNavKey, initNav, wireNavClicks } from "./app/nav";
 import { mountSettings } from "./app/ui/settings";
 import { mountSlideshow } from "./app/ui/slideshow";
 import { mountStage } from "./app/ui/stage";
+import { mountTags } from "./app/ui/tags";
 
 const appWindow = getCurrentWindow();
 
@@ -92,6 +93,7 @@ async function init(): Promise<void> {
     wireNavClicks(stageRoot);
   }
   if (appRoot) {
+    mountTags(appRoot, setStatus);
     mountSettings(appRoot, setStatus);
     mountSlideshow(appRoot, setStatus);
   }

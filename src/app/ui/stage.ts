@@ -4,6 +4,7 @@
 
 import { mediaUrl, type MediaItem } from "../api";
 import { state, type StageEmptyReason } from "../state";
+import { onMediaDisplayed } from "./tags";
 
 let emptyEl: HTMLElement | null = null;
 let mediaHost: HTMLElement | null = null;
@@ -87,6 +88,8 @@ export function showEmpty(reason: StageEmptyReason): void {
   state.stageEmpty = reason;
   clearMedia();
   renderEmpty(reason);
+  // Stop tag sounds / clear badges when nothing is displayed.
+  onMediaDisplayed(null);
 }
 
 /** Load and display a media item (image or video). */

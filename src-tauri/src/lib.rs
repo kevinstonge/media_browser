@@ -20,6 +20,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db_health,
             commands::pick_folder,
+            commands::pick_file,
             commands::get_last_root,
             commands::get_root_info,
             commands::settings_get,
@@ -29,6 +30,13 @@ pub fn run() {
             commands::get_first_media,
             commands::get_neighbor,
             commands::get_random,
+            commands::list_tags,
+            commands::create_tag,
+            commands::delete_tag,
+            commands::add_media_tag,
+            commands::remove_media_tag,
+            commands::add_tag_asset,
+            commands::remove_tag_asset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

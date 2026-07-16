@@ -44,6 +44,7 @@ import {
 } from "./state";
 import { isOverChrome } from "./ui/chrome";
 import { showMedia } from "./ui/stage";
+import { onMediaDisplayed } from "./ui/tags";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
@@ -97,6 +98,7 @@ function persistLastMediaId(id: number | null): Promise<void> {
 export async function displayMedia(item: MediaItem): Promise<void> {
   setCurrentMedia(item);
   showMedia(item);
+  onMediaDisplayed(item);
   flashStatus(item.filename);
   // Await so navigating gate covers the write; queue keeps latest id wins.
   await persistLastMediaId(item.id);
@@ -119,6 +121,7 @@ async function displayMediaForNav(
 
   setCurrentMedia(item);
   showMedia(item);
+  onMediaDisplayed(item);
   flashStatus(item.filename);
   await persistLastMediaId(item.id);
 

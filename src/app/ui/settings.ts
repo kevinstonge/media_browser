@@ -1,17 +1,25 @@
 /**
- * Settings overlay: folder path, Scan / Re-scan, browse + slideshow nav modes, duration.
+ * Settings overlay: folder path, Scan / Re-scan, browse + slideshow nav modes,
+ * duration, and global tag manager (create/delete + badge/sound assets).
  */
 
 import {
+  addTagAsset,
+  createTag,
+  deleteTag,
   getFirstMedia,
   getLastRoot,
   getMedia,
   getRootInfo,
+  listTags,
+  pickFile,
   pickFolder,
+  removeTagAsset,
   scanRoot,
   settingsGet,
   type MediaItem,
   type RootInfo,
+  type Tag,
 } from "../api";
 import {
   jumpToMedia,
@@ -30,6 +38,11 @@ import {
 } from "../state";
 import { showEmpty } from "./stage";
 import { onSlideshowSettingsChanged, stopSlideshow } from "./slideshow";
+import {
+  refreshVocabulary,
+  reloadCurrentItemTags,
+  setTagVocabularyListener,
+} from "./tags";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
@@ -41,6 +54,9 @@ let gearBtn: HTMLButtonElement | null = null;
 let navModeSelect: HTMLSelectElement | null = null;
 let slideshowNavModeSelect: HTMLSelectElement | null = null;
 let slideshowDurationInput: HTMLInputElement | null = null;
+let tagManagerList: HTMLElement | null = null;
+let tagCreateInput: HTMLInputElement | null = null;
+let settingsTags: Tag[] = [];
 
 const NAV_MODE_OPTIONS = `
   <option value="alpha">Alphabetical</option>
@@ -91,6 +107,19 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
           aria-label="Slideshow duration in seconds"
         />
       </div>
+      <div class="settings-section-title">Tags</div>
+      <div class="settings-row">
+        <input
+          type="text"
+          class="settings-input"
+          id="settings-tag-create"
+          placeholder="New tag name"
+          maxlength="64"
+          aria-label="Create tag"
+        />
+        <button type="button" class="settings-btn" id="settings-tag-create-btn">Create</button>
+      </div>
+      <div class="settings-tag-list" id="settings-tag-list" role="list"></div>
       <p class="settings-hint" id="settings-hint">Left/Right arrows or click · Right-click = next</p>
     </div>
   `;
@@ -103,11 +132,32 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   navModeSelect = chrome.querySelector("#settings-nav-mode");
   slideshowNavModeSelect = chrome.querySelector("#settings-slideshow-nav-mode");
   slideshowDurationInput = chrome.querySelector("#settings-slideshow-duration");
+  tagManagerList = chrome.querySelector("#settings-tag-list");
+  tagCreateInput = chrome.querySelector("#settings-tag-create");
+  const tagCreateBtn = chrome.querySelector<HTMLButtonElement>("#settings-tag-create-btn");
   const browseBtn = chrome.querySelector<HTMLButtonElement>("#settings-browse");
+
+  setTagVocabularyListener(() => {
+    void refreshTagManager();
+  });
 
   gearBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
     togglePanel();
+    if (panel && !panel.hidden) {
+      void refreshTagManager();
+    }
+  });
+
+  tagCreateBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void onCreateTagFromSettings();
+  });
+  tagCreateInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void onCreateTagFromSettings();
+    }
   });
 
   browseBtn?.addEventListener("click", (e) => {
@@ -223,6 +273,190 @@ async function loadSettings(): Promise<void> {
 function togglePanel(): void {
   if (!panel) return;
   panel.hidden = !panel.hidden;
+}
+
+async function refreshTagManager(): Promise<void> {
+  try {
+    settingsTags = await listTags();
+  } catch (err) {
+    console.warn("list_tags (settings) failed", err);
+    settingsTags = [];
+  }
+  renderTagManager();
+}
+
+function renderTagManager(): void {
+  if (!tagManagerList) return;
+  tagManagerList.innerHTML = "";
+
+  if (settingsTags.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "settings-tag-empty";
+    empty.textContent = "No tags yet — create one above.";
+    tagManagerList.appendChild(empty);
+    return;
+  }
+
+  for (const tag of settingsTags) {
+    tagManagerList.appendChild(buildTagCard(tag));
+  }
+}
+
+function buildTagCard(tag: Tag): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "settings-tag-card";
+  card.setAttribute("role", "listitem");
+  card.dataset.tagId = String(tag.id);
+
+  const header = document.createElement("div");
+  header.className = "settings-tag-card-header";
+
+  const name = document.createElement("span");
+  name.className = "settings-tag-name";
+  name.textContent = tag.name;
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "settings-btn settings-btn-danger";
+  del.textContent = "Delete";
+  del.title = `Delete tag “${tag.name}”`;
+  del.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void onDeleteTag(tag);
+  });
+
+  header.appendChild(name);
+  header.appendChild(del);
+  card.appendChild(header);
+
+  card.appendChild(
+    buildAssetSection(tag, "image", "Badge images", "Add image…"),
+  );
+  card.appendChild(
+    buildAssetSection(tag, "sound", "Sounds", "Add sound…"),
+  );
+
+  return card;
+}
+
+function buildAssetSection(
+  tag: Tag,
+  assetType: "image" | "sound",
+  label: string,
+  addLabel: string,
+): HTMLElement {
+  const section = document.createElement("div");
+  section.className = "settings-tag-assets";
+
+  const lab = document.createElement("div");
+  lab.className = "settings-tag-assets-label";
+  lab.textContent = label;
+  section.appendChild(lab);
+
+  const assets = (tag.assets ?? []).filter((a) => a.assetType === assetType);
+  if (assets.length === 0) {
+    const none = document.createElement("div");
+    none.className = "settings-tag-asset-empty";
+    none.textContent = "None";
+    section.appendChild(none);
+  } else {
+    for (const asset of assets) {
+      const row = document.createElement("div");
+      row.className = "settings-tag-asset-row";
+
+      const path = document.createElement("span");
+      path.className = "settings-tag-asset-path";
+      path.title = asset.path;
+      path.textContent = asset.path;
+
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "settings-btn settings-btn-tiny";
+      rm.textContent = "×";
+      rm.title = "Remove asset";
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void onRemoveAsset(asset.id);
+      });
+
+      row.appendChild(path);
+      row.appendChild(rm);
+      section.appendChild(row);
+    }
+  }
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "settings-btn settings-btn-tiny settings-tag-add-asset";
+  add.textContent = addLabel;
+  add.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void onAddAsset(tag.id, assetType);
+  });
+  section.appendChild(add);
+
+  return section;
+}
+
+async function onCreateTagFromSettings(): Promise<void> {
+  const name = tagCreateInput?.value.trim() ?? "";
+  if (!name) return;
+  try {
+    await createTag(name);
+    if (tagCreateInput) tagCreateInput.value = "";
+    await refreshTagManager();
+    await refreshVocabulary();
+    setStatus(`Created tag “${name}”`, true);
+    window.setTimeout(() => setStatus("", false), 2000);
+  } catch (err) {
+    setStatus(`Create tag failed: ${formatErr(err)}`, true);
+  }
+}
+
+async function onDeleteTag(tag: Tag): Promise<void> {
+  const ok = window.confirm(
+    `Delete tag “${tag.name}”? This removes it from all media and deletes its assets.`,
+  );
+  if (!ok) return;
+  try {
+    await deleteTag(tag.id);
+    await refreshTagManager();
+    await refreshVocabulary();
+    await reloadCurrentItemTags();
+    setStatus(`Deleted tag “${tag.name}”`, true);
+    window.setTimeout(() => setStatus("", false), 2000);
+  } catch (err) {
+    setStatus(`Delete tag failed: ${formatErr(err)}`, true);
+  }
+}
+
+async function onAddAsset(
+  tagId: number,
+  assetType: "image" | "sound",
+): Promise<void> {
+  try {
+    const path = await pickFile(assetType);
+    if (!path) return;
+    await addTagAsset(tagId, assetType, path);
+    await refreshTagManager();
+    await refreshVocabulary();
+    await reloadCurrentItemTags();
+    setStatus(`Added ${assetType} asset`, true);
+    window.setTimeout(() => setStatus("", false), 2000);
+  } catch (err) {
+    setStatus(`Add asset failed: ${formatErr(err)}`, true);
+  }
+}
+
+async function onRemoveAsset(assetId: number): Promise<void> {
+  try {
+    await removeTagAsset(assetId);
+    await refreshTagManager();
+    await refreshVocabulary();
+    await reloadCurrentItemTags();
+  } catch (err) {
+    setStatus(`Remove asset failed: ${formatErr(err)}`, true);
+  }
 }
 
 function updatePathDisplay(root: RootInfo | null): void {

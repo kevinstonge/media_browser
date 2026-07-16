@@ -86,6 +86,25 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TagAsset {
+    pub id: i64,
+    pub tag_id: i64,
+    pub asset_type: String,
+    pub path: String,
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub assets: Vec<TagAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaItem {
     pub id: i64,
     pub root_dir_id: i64,
@@ -98,6 +117,9 @@ pub struct MediaItem {
     pub size_bytes: Option<i64>,
     pub mtime_ms: Option<i64>,
     pub is_missing: bool,
+    /// Tags attached to this item (with assets). Empty for lightweight queries that skip load.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +147,7 @@ fn map_media_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
         size_bytes: row.get(8)?,
         mtime_ms: row.get(9)?,
         is_missing: is_missing_i != 0,
+        tags: Vec::new(),
     })
 }
 
@@ -312,31 +335,317 @@ pub fn get_last_root(conn: &Connection) -> Result<Option<RootInfo>, String> {
     }
 }
 
+// --- Tags -------------------------------------------------------------------
+
+fn load_assets_for_tag(conn: &Connection, tag_id: i64) -> Result<Vec<TagAsset>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, tag_id, asset_type, path, sort_order
+             FROM tag_asset
+             WHERE tag_id = ?1
+             ORDER BY sort_order ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare tag_asset: {e}"))?;
+    let rows = stmt
+        .query_map(params![tag_id], |r| {
+            Ok(TagAsset {
+                id: r.get(0)?,
+                tag_id: r.get(1)?,
+                asset_type: r.get(2)?,
+                path: r.get(3)?,
+                sort_order: r.get(4)?,
+            })
+        })
+        .map_err(|e| format!("query tag_asset: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tag_asset row: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn map_tag_row(conn: &Connection, id: i64, name: String, created_at: String) -> Result<Tag, String> {
+    let assets = load_assets_for_tag(conn, id)?;
+    Ok(Tag {
+        id,
+        name,
+        created_at,
+        assets,
+    })
+}
+
+/// All tags in vocabulary, each with assets ordered by sort_order.
+pub fn list_tags(conn: &Connection) -> Result<Vec<Tag>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at FROM tag ORDER BY name COLLATE NOCASE ASC")
+        .map_err(|e| format!("prepare list_tags: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query list_tags: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, created_at) = row.map_err(|e| format!("list_tags row: {e}"))?;
+        out.push(map_tag_row(conn, id, name, created_at)?);
+    }
+    Ok(out)
+}
+
+/// Tags attached to a media item (with assets).
+pub fn tags_for_media(conn: &Connection, media_item_id: i64) -> Result<Vec<Tag>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, t.name, t.created_at
+             FROM tag t
+             INNER JOIN media_tag mt ON mt.tag_id = t.id
+             WHERE mt.media_item_id = ?1
+             ORDER BY t.name COLLATE NOCASE ASC",
+        )
+        .map_err(|e| format!("prepare tags_for_media: {e}"))?;
+    let rows = stmt
+        .query_map(params![media_item_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query tags_for_media: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, created_at) = row.map_err(|e| format!("tags_for_media row: {e}"))?;
+        out.push(map_tag_row(conn, id, name, created_at)?);
+    }
+    Ok(out)
+}
+
+/// Create a tag by name (case-insensitive unique). Returns existing if name collides.
+pub fn create_tag(conn: &Connection, name: &str) -> Result<Tag, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("tag name must not be empty".into());
+    }
+
+    // Reuse existing (NOCASE unique).
+    if let Some(existing) = conn
+        .query_row(
+            "SELECT id, name, created_at FROM tag WHERE name = ?1 COLLATE NOCASE",
+            params![trimmed],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("create_tag lookup: {e}"))?
+    {
+        let (id, name, created_at) = existing;
+        return map_tag_row(conn, id, name, created_at);
+    }
+
+    conn.execute(
+        "INSERT INTO tag (name, created_at) VALUES (?1, datetime('now'))",
+        params![trimmed],
+    )
+    .map_err(|e| format!("create_tag insert: {e}"))?;
+    let id = conn.last_insert_rowid();
+    let created_at: String = conn
+        .query_row(
+            "SELECT created_at FROM tag WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("create_tag created_at: {e}"))?;
+    map_tag_row(conn, id, trimmed.to_string(), created_at)
+}
+
+/// Delete tag; media_tag + tag_asset cascade via FK.
+pub fn delete_tag(conn: &Connection, tag_id: i64) -> Result<(), String> {
+    let n = conn
+        .execute("DELETE FROM tag WHERE id = ?1", params![tag_id])
+        .map_err(|e| format!("delete_tag: {e}"))?;
+    if n == 0 {
+        return Err(format!("tag {tag_id} not found"));
+    }
+    Ok(())
+}
+
+pub fn add_media_tag(conn: &Connection, media_item_id: i64, tag_id: i64) -> Result<Tag, String> {
+    // Ensure both exist.
+    let tag_row = conn
+        .query_row(
+            "SELECT id, name, created_at FROM tag WHERE id = ?1",
+            params![tag_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("add_media_tag tag: {e}"))?
+        .ok_or_else(|| format!("tag {tag_id} not found"))?;
+
+    let media_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM media_item WHERE id = ?1",
+            params![media_item_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("add_media_tag media: {e}"))?;
+    if media_exists == 0 {
+        return Err(format!("media item {media_item_id} not found"));
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO media_tag (media_item_id, tag_id) VALUES (?1, ?2)",
+        params![media_item_id, tag_id],
+    )
+    .map_err(|e| format!("add_media_tag: {e}"))?;
+
+    map_tag_row(conn, tag_row.0, tag_row.1, tag_row.2)
+}
+
+pub fn remove_media_tag(conn: &Connection, media_item_id: i64, tag_id: i64) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM media_tag WHERE media_item_id = ?1 AND tag_id = ?2",
+        params![media_item_id, tag_id],
+    )
+    .map_err(|e| format!("remove_media_tag: {e}"))?;
+    Ok(())
+}
+
+pub fn add_tag_asset(
+    conn: &Connection,
+    tag_id: i64,
+    asset_type: &str,
+    path: &str,
+) -> Result<TagAsset, String> {
+    let at = asset_type.to_ascii_lowercase();
+    if at != "image" && at != "sound" {
+        return Err(format!("invalid asset_type: {asset_type} (expected image|sound)"));
+    }
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("asset path must not be empty".into());
+    }
+
+    let tag_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tag WHERE id = ?1",
+            params![tag_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("add_tag_asset tag: {e}"))?;
+    if tag_exists == 0 {
+        return Err(format!("tag {tag_id} not found"));
+    }
+
+    // Next sort_order within this tag + type.
+    let next_order: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tag_asset
+             WHERE tag_id = ?1 AND asset_type = ?2",
+            params![tag_id, at],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("add_tag_asset sort: {e}"))?;
+
+    conn.execute(
+        "INSERT INTO tag_asset (tag_id, asset_type, path, sort_order)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(tag_id, asset_type, path) DO UPDATE SET sort_order = excluded.sort_order",
+        params![tag_id, at, path, next_order],
+    )
+    .map_err(|e| format!("add_tag_asset insert: {e}"))?;
+
+    // Resolve id (insert or existing).
+    let asset = conn
+        .query_row(
+            "SELECT id, tag_id, asset_type, path, sort_order FROM tag_asset
+             WHERE tag_id = ?1 AND asset_type = ?2 AND path = ?3",
+            params![tag_id, at, path],
+            |r| {
+                Ok(TagAsset {
+                    id: r.get(0)?,
+                    tag_id: r.get(1)?,
+                    asset_type: r.get(2)?,
+                    path: r.get(3)?,
+                    sort_order: r.get(4)?,
+                })
+            },
+        )
+        .map_err(|e| format!("add_tag_asset fetch: {e}"))?;
+    Ok(asset)
+}
+
+pub fn remove_tag_asset(conn: &Connection, asset_id: i64) -> Result<(), String> {
+    let n = conn
+        .execute("DELETE FROM tag_asset WHERE id = ?1", params![asset_id])
+        .map_err(|e| format!("remove_tag_asset: {e}"))?;
+    if n == 0 {
+        return Err(format!("tag_asset {asset_id} not found"));
+    }
+    Ok(())
+}
+
 // --- Media queries ----------------------------------------------------------
 
 pub fn get_media(conn: &Connection, id: i64) -> Result<Option<MediaItem>, String> {
-    conn.query_row(
-        &format!("{MEDIA_SELECT} WHERE id = ?1"),
-        params![id],
-        map_media_row,
-    )
-    .optional()
-    .map_err(|e| format!("get_media: {e}"))
+    let mut item = conn
+        .query_row(
+            &format!("{MEDIA_SELECT} WHERE id = ?1"),
+            params![id],
+            map_media_row,
+        )
+        .optional()
+        .map_err(|e| format!("get_media: {e}"))?;
+    if let Some(ref mut m) = item {
+        m.tags = tags_for_media(conn, m.id)?;
+    }
+    Ok(item)
+}
+
+fn attach_tags(conn: &Connection, mut item: MediaItem) -> Result<MediaItem, String> {
+    item.tags = tags_for_media(conn, item.id)?;
+    Ok(item)
+}
+
+fn attach_tags_opt(
+    conn: &Connection,
+    item: Option<MediaItem>,
+) -> Result<Option<MediaItem>, String> {
+    match item {
+        Some(m) => Ok(Some(attach_tags(conn, m)?)),
+        None => Ok(None),
+    }
 }
 
 pub fn get_first_media(conn: &Connection, root_id: i64) -> Result<Option<MediaItem>, String> {
-    conn.query_row(
-        &format!(
-            "{MEDIA_SELECT}
-             WHERE root_dir_id = ?1 AND is_missing = 0
-             ORDER BY rel_path COLLATE NOCASE ASC
-             LIMIT 1"
-        ),
-        params![root_id],
-        map_media_row,
-    )
-    .optional()
-    .map_err(|e| format!("get_first_media: {e}"))
+    let item = conn
+        .query_row(
+            &format!(
+                "{MEDIA_SELECT}
+                 WHERE root_dir_id = ?1 AND is_missing = 0
+                 ORDER BY rel_path COLLATE NOCASE ASC
+                 LIMIT 1"
+            ),
+            params![root_id],
+            map_media_row,
+        )
+        .optional()
+        .map_err(|e| format!("get_first_media: {e}"))?;
+    attach_tags_opt(conn, item)
 }
 
 /// Alpha neighbor by rel_path COLLATE NOCASE. direction: "next" | "prev". Wraps.
@@ -375,7 +684,20 @@ pub fn get_neighbor(
                 .map_err(|e| format!("neighbor next: {e}"))?;
             match next {
                 Some(m) => Some(m),
-                None => get_first_media(conn, root_id)?, // wrap
+                // wrap — row only; tags attached below once
+                None => conn
+                    .query_row(
+                        &format!(
+                            "{MEDIA_SELECT}
+                             WHERE root_dir_id = ?1 AND is_missing = 0
+                             ORDER BY rel_path COLLATE NOCASE ASC
+                             LIMIT 1"
+                        ),
+                        params![root_id],
+                        map_media_row,
+                    )
+                    .optional()
+                    .map_err(|e| format!("neighbor first wrap: {e}"))?,
             }
         }
         "prev" | "previous" | "back" | "left" => {
@@ -415,7 +737,7 @@ pub fn get_neighbor(
         other => return Err(format!("unknown direction: {other}")),
     };
 
-    Ok(neighbor)
+    attach_tags_opt(conn, neighbor)
 }
 
 /// Uniform random among non-missing items in root; optional parent_dir filter.
@@ -458,12 +780,12 @@ pub fn get_random(
                 .map_err(|e| format!("get_random exclude: {e}"))?,
         };
         if excluded.is_some() {
-            return Ok(excluded);
+            return attach_tags_opt(conn, excluded);
         }
         // Only one item (or empty) — fall through without exclude.
     }
 
-    match parent_dir {
+    let item = match parent_dir {
         Some(pd) => conn
             .query_row(
                 &format!(
@@ -476,7 +798,7 @@ pub fn get_random(
                 map_media_row,
             )
             .optional()
-            .map_err(|e| format!("get_random dir: {e}")),
+            .map_err(|e| format!("get_random dir: {e}"))?,
         None => conn
             .query_row(
                 &format!(
@@ -489,8 +811,9 @@ pub fn get_random(
                 map_media_row,
             )
             .optional()
-            .map_err(|e| format!("get_random: {e}")),
-    }
+            .map_err(|e| format!("get_random: {e}"))?,
+    };
+    attach_tags_opt(conn, item)
 }
 
 #[cfg(test)]
@@ -625,6 +948,34 @@ mod tests {
             .unwrap()
             .expect("single");
         assert_eq!(item.id, only);
+    }
+
+    #[test]
+    fn tags_create_attach_assets_and_cascade_delete() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\tags");
+        let media_id = seed_media(&conn, root, r"C:\tags\a.jpg", "a.jpg", r"C:\tags");
+
+        let tag = create_tag(&conn, "  Favorite  ").unwrap();
+        assert_eq!(tag.name, "Favorite");
+        // Case-insensitive reuse
+        let again = create_tag(&conn, "favorite").unwrap();
+        assert_eq!(again.id, tag.id);
+
+        add_media_tag(&conn, media_id, tag.id).unwrap();
+        let asset = add_tag_asset(&conn, tag.id, "image", r"C:\badges\f.png").unwrap();
+        assert_eq!(asset.asset_type, "image");
+        let _sound = add_tag_asset(&conn, tag.id, "sound", r"C:\sfx\ding.mp3").unwrap();
+
+        let item = get_media(&conn, media_id).unwrap().expect("media");
+        assert_eq!(item.tags.len(), 1);
+        assert_eq!(item.tags[0].assets.len(), 2);
+
+        delete_tag(&conn, tag.id).unwrap();
+        let item2 = get_media(&conn, media_id).unwrap().expect("media");
+        assert!(item2.tags.is_empty());
+        let tags = list_tags(&conn).unwrap();
+        assert!(tags.is_empty());
     }
 }
 
