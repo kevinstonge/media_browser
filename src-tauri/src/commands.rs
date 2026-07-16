@@ -115,15 +115,17 @@ pub fn get_neighbor(
 }
 
 /// Random non-missing item in root; optional parent_dir for current-dir random.
+/// `exclude_id` avoids immediate repeat when another item exists.
 #[tauri::command]
 pub fn get_random(
     state: State<'_, DbState>,
     root_id: i64,
     parent_dir: Option<String>,
+    exclude_id: Option<i64>,
 ) -> Result<Option<MediaItem>, String> {
     let conn = state
         .0
         .lock()
         .map_err(|e| format!("db lock poisoned: {e}"))?;
-    db_random(&conn, root_id, parent_dir.as_deref())
+    db_random(&conn, root_id, parent_dir.as_deref(), exclude_id)
 }

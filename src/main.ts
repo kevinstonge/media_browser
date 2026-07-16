@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dbHealth } from "./app/api";
+import { handleNavKey, initNav, wireNavClicks } from "./app/nav";
 import { mountSettings } from "./app/ui/settings";
 import { mountStage } from "./app/ui/stage";
 
@@ -48,6 +49,7 @@ function wireKeyboard(): void {
       target &&
       (target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
         target.isContentEditable)
     ) {
       return;
@@ -70,17 +72,23 @@ function wireKeyboard(): void {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "q") {
       e.preventDefault();
       void quitApp();
+      return;
     }
+
+    // Left / Right navigation
+    if (handleNavKey(e)) return;
   });
 }
 
 async function init(): Promise<void> {
+  initNav(setStatus);
   wireKeyboard();
 
   const stageRoot = document.querySelector<HTMLElement>("#stage");
   const appRoot = document.querySelector<HTMLElement>("#app");
   if (stageRoot) {
     mountStage(stageRoot);
+    wireNavClicks(stageRoot);
   }
   if (appRoot) {
     mountSettings(appRoot, setStatus);

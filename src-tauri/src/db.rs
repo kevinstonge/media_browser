@@ -419,11 +419,50 @@ pub fn get_neighbor(
 }
 
 /// Uniform random among non-missing items in root; optional parent_dir filter.
+/// When `exclude_id` is set, prefer a different item (falls back to the only item if pool size is 1).
 pub fn get_random(
     conn: &Connection,
     root_id: i64,
     parent_dir: Option<&str>,
+    exclude_id: Option<i64>,
 ) -> Result<Option<MediaItem>, String> {
+    // Try excluding current first when possible.
+    if let Some(ex) = exclude_id {
+        let excluded = match parent_dir {
+            Some(pd) => conn
+                .query_row(
+                    &format!(
+                        "{MEDIA_SELECT}
+                         WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                           AND id != ?3
+                         ORDER BY RANDOM()
+                         LIMIT 1"
+                    ),
+                    params![root_id, pd, ex],
+                    map_media_row,
+                )
+                .optional()
+                .map_err(|e| format!("get_random dir exclude: {e}"))?,
+            None => conn
+                .query_row(
+                    &format!(
+                        "{MEDIA_SELECT}
+                         WHERE root_dir_id = ?1 AND is_missing = 0 AND id != ?2
+                         ORDER BY RANDOM()
+                         LIMIT 1"
+                    ),
+                    params![root_id, ex],
+                    map_media_row,
+                )
+                .optional()
+                .map_err(|e| format!("get_random exclude: {e}"))?,
+        };
+        if excluded.is_some() {
+            return Ok(excluded);
+        }
+        // Only one item (or empty) — fall through without exclude.
+    }
+
     match parent_dir {
         Some(pd) => conn
             .query_row(
@@ -552,7 +591,7 @@ mod tests {
 
         // Only one item in y — random must return it.
         for _ in 0..8 {
-            let item = get_random(&conn, root, Some(r"C:\lib\y"))
+            let item = get_random(&conn, root, Some(r"C:\lib\y"), None)
                 .unwrap()
                 .expect("random y");
             assert_eq!(item.id, y);
@@ -560,7 +599,32 @@ mod tests {
         }
 
         // Empty dir filter → None
-        assert!(get_random(&conn, root, Some(r"C:\lib\z")).unwrap().is_none());
+        assert!(get_random(&conn, root, Some(r"C:\lib\z"), None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn get_random_avoids_immediate_repeat_when_possible() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\rnd");
+        let a = seed_media(&conn, root, r"C:\rnd\a.jpg", "a.jpg", r"C:\rnd");
+        let b = seed_media(&conn, root, r"C:\rnd\b.jpg", "b.jpg", r"C:\rnd");
+
+        for _ in 0..12 {
+            let item = get_random(&conn, root, None, Some(a))
+                .unwrap()
+                .expect("random");
+            assert_eq!(item.id, b, "should exclude a when another exists");
+        }
+
+        // Single item: exclude falls back to that item
+        let root2 = seed_root(&conn, r"C:\onlyroot");
+        let only = seed_media(&conn, root2, r"C:\onlyroot\o.jpg", "o.jpg", r"C:\onlyroot");
+        let item = get_random(&conn, root2, None, Some(only))
+            .unwrap()
+            .expect("single");
+        assert_eq!(item.id, only);
     }
 }
 

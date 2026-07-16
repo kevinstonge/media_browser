@@ -270,3 +270,32 @@ body {
   color: #666;
   line-height: 1.35;
 }
+
+.settings-select {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #eee;
+  cursor: pointer;
+}
+
+.settings-select:hover,
+.settings-select:focus {
+  border-color: #555;
+  outline: none;
+}
+
+.settings-select:focus-visible {
+  border-color: #5a8ad0;
+  box-shadow: 0 0 0 2px rgba(90, 138, 208, 0.35);
+}
+
+/* Ensure stage receives click nav when chrome is not targeted */
+.stage {
+  cursor: default;
+}

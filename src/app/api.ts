@@ -77,10 +77,12 @@ export async function getNeighbor(
 export async function getRandom(
   rootId: number,
   parentDir?: string | null,
+  excludeId?: number | null,
 ): Promise<MediaItem | null> {
   return invoke<MediaItem | null>("get_random", {
     rootId,
     parentDir: parentDir ?? null,
+    excludeId: excludeId ?? null,
   });
 }
 

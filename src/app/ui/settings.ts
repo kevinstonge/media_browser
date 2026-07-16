@@ -1,18 +1,21 @@
 /**
- * Settings overlay (partial): folder path, Scan / Re-scan.
+ * Settings overlay: folder path, Scan / Re-scan, nav mode.
  */
 
 import {
   getFirstMedia,
   getLastRoot,
+  getMedia,
   getRootInfo,
   pickFolder,
   scanRoot,
+  settingsGet,
   type MediaItem,
   type RootInfo,
 } from "../api";
-import { setCurrentMedia, state } from "../state";
-import { showEmpty, showMedia } from "./stage";
+import { jumpToMedia, parseNavMode, setNavMode } from "../nav";
+import { clearHistory, setCurrentMedia, state, type NavMode } from "../state";
+import { showEmpty } from "./stage";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
@@ -21,13 +24,14 @@ let panel: HTMLElement | null = null;
 let pathEl: HTMLElement | null = null;
 let scanBtn: HTMLButtonElement | null = null;
 let gearBtn: HTMLButtonElement | null = null;
+let navModeSelect: HTMLSelectElement | null = null;
 
 export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   setStatus = statusFn;
 
-  // Gear hit region (top-right)
+  // Gear hit region (top-right) — padded; navigation clicks excluded via .settings-chrome
   const chrome = document.createElement("div");
-  chrome.className = "settings-chrome";
+  chrome.className = "settings-chrome nav-exclude";
   chrome.innerHTML = `
     <button type="button" class="settings-gear" id="settings-gear" title="Settings" aria-label="Settings">⚙</button>
     <div class="settings-panel" id="settings-panel" hidden>
@@ -40,7 +44,15 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
       <div class="settings-row settings-row-actions">
         <button type="button" class="settings-btn settings-btn-primary" id="settings-scan" disabled>Scan</button>
       </div>
-      <p class="settings-hint" id="settings-hint"></p>
+      <label class="settings-label" for="settings-nav-mode">Default mode — next item shows</label>
+      <div class="settings-row">
+        <select class="settings-select" id="settings-nav-mode" aria-label="Navigation mode">
+          <option value="alpha">Alphabetical</option>
+          <option value="random_root">Random (whole library)</option>
+          <option value="random_current_dir">Random (current folder)</option>
+        </select>
+      </div>
+      <p class="settings-hint" id="settings-hint">Left/Right arrows or click · Right-click = next</p>
     </div>
   `;
   root.appendChild(chrome);
@@ -49,6 +61,7 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
   panel = chrome.querySelector("#settings-panel");
   pathEl = chrome.querySelector("#settings-path");
   scanBtn = chrome.querySelector("#settings-scan");
+  navModeSelect = chrome.querySelector("#settings-nav-mode");
   const browseBtn = chrome.querySelector<HTMLButtonElement>("#settings-browse");
 
   gearBtn?.addEventListener("click", (e) => {
@@ -66,6 +79,13 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
     void onScan();
   });
 
+  navModeSelect?.addEventListener("change", () => {
+    const value = navModeSelect?.value as NavMode;
+    void setNavMode(value);
+    setStatus(`Nav mode: ${labelForMode(value)}`, true);
+    window.setTimeout(() => setStatus("", false), 2000);
+  });
+
   // Keep panel open when interacting inside it
   panel?.addEventListener("click", (e) => e.stopPropagation());
 
@@ -77,7 +97,25 @@ export function mountSettings(root: HTMLElement, statusFn: StatusFn): void {
     panel.hidden = true;
   });
 
-  void restoreLastRoot();
+  void bootstrap();
+}
+
+async function bootstrap(): Promise<void> {
+  await loadNavMode();
+  await restoreLastRoot();
+}
+
+async function loadNavMode(): Promise<void> {
+  try {
+    const raw = await settingsGet("nav_mode");
+    const mode = parseNavMode(raw);
+    state.navMode = mode;
+    if (navModeSelect) navModeSelect.value = mode;
+  } catch (err) {
+    console.warn("load nav_mode failed", err);
+    state.navMode = "alpha";
+    if (navModeSelect) navModeSelect.value = "alpha";
+  }
 }
 
 function togglePanel(): void {
@@ -103,16 +141,24 @@ function updatePathDisplay(root: RootInfo | null): void {
   scanBtn.textContent = root.needsScan ? "Scan" : "Re-scan";
 }
 
+/**
+ * Restore last root from DB (active_root_id / root_usage).
+ * Loads existing library only — no automatic re-scan.
+ */
 async function restoreLastRoot(): Promise<void> {
   try {
     const root = await getLastRoot();
     state.root = root;
     updatePathDisplay(root);
     if (!root) {
+      clearHistory();
+      setCurrentMedia(null);
       showEmpty("no_root");
       return;
     }
     if (root.itemCount === 0) {
+      clearHistory();
+      setCurrentMedia(null);
       showEmpty("no_media");
       setStatus(
         root.needsScan
@@ -123,20 +169,47 @@ async function restoreLastRoot(): Promise<void> {
       return;
     }
     showEmpty("loading");
-    const first = await getFirstMedia(root.id);
-    if (!first) {
+
+    // Prefer last_media_id when still in this root; else first alpha item.
+    const item = await resolveStartupMedia(root);
+    if (!item) {
+      clearHistory();
+      setCurrentMedia(null);
       showEmpty("no_media");
       return;
     }
-    setCurrentMedia(first);
-    showMedia(first);
-    setStatus(`${first.filename}`, true);
-    window.setTimeout(() => setStatus("", false), 3000);
+    await jumpToMedia(item);
   } catch (err) {
     console.error(err);
+    clearHistory();
+    setCurrentMedia(null);
     showEmpty("no_root");
     setStatus(`Failed to restore root: ${formatErr(err)}`, true);
   }
+}
+
+async function resolveStartupMedia(root: RootInfo): Promise<MediaItem | null> {
+  try {
+    const raw = await settingsGet("last_media_id");
+    if (raw) {
+      let id: number | null = null;
+      try {
+        id = JSON.parse(raw) as number | null;
+      } catch {
+        const n = Number(raw);
+        id = Number.isFinite(n) ? n : null;
+      }
+      if (id != null) {
+        const item = await getMedia(id);
+        if (item && item.rootDirId === root.id && !item.isMissing) {
+          return item;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("last_media_id restore failed", err);
+  }
+  return getFirstMedia(root.id);
 }
 
 async function onBrowse(): Promise<void> {
@@ -155,6 +228,7 @@ async function onBrowse(): Promise<void> {
     };
     updatePathDisplay(state.root);
     if (!samePath) {
+      clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
       setStatus("Folder selected — press Scan", true);
@@ -193,6 +267,7 @@ async function onScan(): Promise<void> {
     );
 
     if (!info || info.itemCount === 0) {
+      clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
       return;
@@ -200,29 +275,41 @@ async function onScan(): Promise<void> {
 
     const first = await getFirstMedia(info.id);
     if (!first) {
+      clearHistory();
       setCurrentMedia(null);
       showEmpty("no_media");
       return;
     }
-    setCurrentMedia(first);
-    showMedia(first);
+    // Direct jump after scan: reset history to [id]
+    await jumpToMedia(first);
     window.setTimeout(() => setStatus(first.filename, true), 50);
     window.setTimeout(() => setStatus("", false), 4000);
   } catch (err) {
     console.error(err);
     setStatus(`Scan failed: ${formatErr(err)}`, true);
     if (previousMedia) {
-      setCurrentMedia(previousMedia);
-      showMedia(previousMedia);
+      await jumpToMedia(previousMedia);
     } else if (state.root && state.root.itemCount > 0 && state.root.id > 0) {
-      // Had items but no in-memory media object — leave error empty state.
       showEmpty("error");
     } else {
+      clearHistory();
+      setCurrentMedia(null);
       showEmpty("no_media");
     }
   } finally {
     state.scanning = false;
     updatePathDisplay(state.root);
+  }
+}
+
+function labelForMode(mode: NavMode): string {
+  switch (mode) {
+    case "alpha":
+      return "Alphabetical";
+    case "random_root":
+      return "Random (library)";
+    case "random_current_dir":
+      return "Random (folder)";
   }
 }
 
