@@ -79,6 +79,7 @@ Schema (v1): `root_dir`, `root_usage`, `media_item`, `tag`, `media_tag`, `tag_as
 
 ```
 media_browser/
+  index.html          # Vite entry (must live at repo root)
   src-tauri/          # Rust backend (Tauri + SQLite)
     src/
       main.rs

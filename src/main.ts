@@ -3,6 +3,17 @@ import { dbHealth } from "./app/api";
 
 const appWindow = getCurrentWindow();
 
+/** Normalize Tauri invoke / unknown rejections for display. */
+function formatError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return Object.prototype.toString.call(err);
+  }
+}
+
 function setStatus(message: string, visible = true): void {
   const el = document.querySelector<HTMLElement>("#status");
   if (!el) return;
@@ -75,7 +86,7 @@ async function init(): Promise<void> {
     window.setTimeout(() => setStatus("", false), 4000);
   } catch (err) {
     console.error("DB health check failed:", err);
-    setStatus(`DB error: ${String(err)}`, true);
+    setStatus(`DB error: ${formatError(err)}`, true);
   }
 }
 

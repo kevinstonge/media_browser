@@ -11,10 +11,8 @@ use tauri::{AppHandle, Manager, State};
 /// Shared SQLite connection (single-threaded access via mutex).
 pub struct DbState(pub Mutex<Connection>);
 
-/// Full v1 schema from PLAN.md §5.1.
+/// Full v1 schema from PLAN.md §5.1 (applied inside a transaction when needed).
 const MIGRATION_V1: &str = r#"
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS root_dir (
   id            INTEGER PRIMARY KEY,
   path          TEXT NOT NULL UNIQUE,
@@ -92,24 +90,40 @@ fn app_data_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("library.db"))
 }
 
-fn run_migrations(conn: &Connection) -> SqlResult<()> {
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    conn.execute_batch(MIGRATION_V1)?;
-
-    let applied: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    if applied == 0 {
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, datetime('now'))",
-            [],
-        )?;
+fn is_migration_applied(conn: &Connection, version: i64) -> SqlResult<bool> {
+    let has_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_table == 0 {
+        return Ok(false);
     }
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+        [version],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn run_migrations(conn: &Connection) -> SqlResult<()> {
+    // Connection-level; not transactional.
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+    // Skip DDL entirely once v1 has been recorded.
+    if is_migration_applied(conn, 1)? {
+        return Ok(());
+    }
+
+    // Atomic apply: all v1 objects + version stamp, or roll back on failure.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(MIGRATION_V1)?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (1, datetime('now'))",
+        [],
+    )?;
+    tx.commit()?;
 
     Ok(())
 }
