@@ -36,6 +36,7 @@ import {
   isNavMode,
   isNavSessionStale,
   isSlideshowActive,
+  reconcileBrowseHistoryWithCurrent,
   resetHistory,
   setCurrentMedia,
   state,
@@ -99,6 +100,34 @@ export async function displayMedia(item: MediaItem): Promise<void> {
   flashStatus(item.filename);
   // Await so navigating gate covers the write; queue keeps latest id wins.
   await persistLastMediaId(item.id);
+}
+
+/**
+ * displayMedia for goNext/goPrev/walkHistory (generation-aware).
+ *
+ * - If already stale before apply: skip setCurrentMedia/showMedia entirely.
+ * - If Stop/Start races during the persist await after apply: re-tip browse at
+ *   the final current so Prev matches the item on screen (ISSUE-5).
+ *
+ * @returns true when the nav session is still live
+ */
+async function displayMediaForNav(
+  item: MediaItem,
+  generation: number,
+): Promise<boolean> {
+  if (isNavSessionStale(generation)) return false;
+
+  setCurrentMedia(item);
+  showMedia(item);
+  flashStatus(item.filename);
+  await persistLastMediaId(item.id);
+
+  if (isNavSessionStale(generation)) {
+    // Stop reconciled against pre-display id while we were in flight; retip.
+    reconcileBrowseHistoryWithCurrent();
+    return false;
+  }
+  return true;
 }
 
 /** Direct jump: reset browse history to [id] and show. */
@@ -180,8 +209,7 @@ async function walkHistory(
       }
       if (direction === "back") commitBackBag(bag);
       else commitForwardBag(bag);
-      await displayMedia(item);
-      if (isNavSessionStale(generation)) return "aborted";
+      if (!(await displayMediaForNav(item, generation))) return "aborted";
       if (skipped > 0) {
         flashStatus(item.filename, 2500);
       }
@@ -238,8 +266,9 @@ export async function goNext(): Promise<void> {
 
     pushHistoryBag(bag, item.id);
     if (isNavSessionStale(generation)) return;
-    await displayMedia(item);
-    if (!isNavSessionStale(generation)) notifyNavStep();
+    if (await displayMediaForNav(item, generation)) {
+      notifyNavStep();
+    }
   } catch (err) {
     console.error("goNext failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);
@@ -285,8 +314,9 @@ export async function goPrev(): Promise<void> {
 
     unshiftHistoryBag(bag, item.id);
     if (isNavSessionStale(generation)) return;
-    await displayMedia(item);
-    if (!isNavSessionStale(generation)) notifyNavStep();
+    if (await displayMediaForNav(item, generation)) {
+      notifyNavStep();
+    }
   } catch (err) {
     console.error("goPrev failed", err);
     flashStatus(`Navigate failed: ${formatErr(err)}`, 4000);

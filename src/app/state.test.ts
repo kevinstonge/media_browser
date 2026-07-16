@@ -134,6 +134,22 @@ describe("reconcileBrowseHistoryWithCurrent (Stop semantics)", () => {
     assert.deepEqual(state.history, [1]);
     assert.equal(state.historyCursor, 0);
   });
+
+  it("re-reconcile after late displayMedia advances current (ISSUE-5)", () => {
+    // Stop reconciled to 5 while displayMedia was in flight; then current becomes 6.
+    resetHistory(1);
+    pushHistory(5);
+    state.currentMediaId = 5;
+    reconcileBrowseHistoryWithCurrent();
+    assert.deepEqual(state.history, [1, 5]);
+    assert.equal(state.historyCursor, 1);
+
+    // In-flight display applies next item after Stop.
+    state.currentMediaId = 6;
+    reconcileBrowseHistoryWithCurrent();
+    assert.deepEqual(state.history, [1, 5, 6]);
+    assert.equal(state.history[state.historyCursor], 6);
+  });
 });
 
 describe("nav session generation", () => {
