@@ -8,6 +8,7 @@ import {
   getRootInfo,
   pickFolder,
   scanRoot,
+  type MediaItem,
   type RootInfo,
 } from "../api";
 import { setCurrentMedia, state } from "../state";
@@ -143,20 +144,21 @@ async function onBrowse(): Promise<void> {
     const path = await pickFolder();
     if (!path) return;
 
-    // Treat as pending root path until scanned — show path immediately.
+    // Only keep prior root id when the path is unchanged; never pair a new path with an old id.
+    const samePath = state.root?.path === path;
     state.root = {
-      id: state.root?.id ?? -1,
+      id: samePath && state.root ? state.root.id : -1,
       path,
-      lastScanned: null,
-      itemCount: 0,
-      needsScan: true,
+      lastScanned: samePath ? (state.root?.lastScanned ?? null) : null,
+      itemCount: samePath ? (state.root?.itemCount ?? 0) : 0,
+      needsScan: samePath ? (state.root?.needsScan ?? true) : true,
     };
     updatePathDisplay(state.root);
-    showEmpty("no_media");
-    setStatus("Folder selected — press Scan", true);
-
-    // If this path was already in DB, refresh root info after a quick check via scan label.
-    // (Scan will upsert; we don't auto-scan.)
+    if (!samePath) {
+      setCurrentMedia(null);
+      showEmpty("no_media");
+      setStatus("Folder selected — press Scan", true);
+    }
   } catch (err) {
     setStatus(`Folder pick failed: ${formatErr(err)}`, true);
   }
@@ -165,6 +167,11 @@ async function onBrowse(): Promise<void> {
 async function onScan(): Promise<void> {
   const path = state.root?.path;
   if (!path || state.scanning) return;
+
+  // Remember media before clearing stage so a failed re-scan can restore it.
+  const previousMedia: MediaItem | null = state.currentMedia
+    ? { ...state.currentMedia }
+    : null;
 
   state.scanning = true;
   if (scanBtn) {
@@ -204,8 +211,12 @@ async function onScan(): Promise<void> {
   } catch (err) {
     console.error(err);
     setStatus(`Scan failed: ${formatErr(err)}`, true);
-    if (state.root?.itemCount) {
-      // keep previous media if any
+    if (previousMedia) {
+      setCurrentMedia(previousMedia);
+      showMedia(previousMedia);
+    } else if (state.root && state.root.itemCount > 0 && state.root.id > 0) {
+      // Had items but no in-memory media object — leave error empty state.
+      showEmpty("error");
     } else {
       showEmpty("no_media");
     }

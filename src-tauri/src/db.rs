@@ -453,3 +453,114 @@ pub fn get_random(
             .map_err(|e| format!("get_random: {e}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("mem db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn seed_root(conn: &Connection, path: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO root_dir (path, created_at, last_scanned) VALUES (?1, datetime('now'), datetime('now'))",
+            params![path],
+        )
+        .unwrap();
+        conn.query_row("SELECT id FROM root_dir WHERE path = ?1", params![path], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn seed_media(
+        conn: &Connection,
+        root_id: i64,
+        path: &str,
+        rel_path: &str,
+        parent_dir: &str,
+    ) -> i64 {
+        let filename = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
+        conn.execute(
+            "INSERT INTO media_item (
+                root_dir_id, path, filename, parent_dir, rel_path,
+                media_type, ext, size_bytes, mtime_ms, is_missing,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'image', 'jpg', 1, 0, 0, datetime('now'), datetime('now'))",
+            params![root_id, path, filename, parent_dir, rel_path],
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT id FROM media_item WHERE path = ?1",
+            params![path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn neighbor_empty_root_returns_none() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\empty");
+        // No media; invent an id that does not exist
+        assert!(get_neighbor(&conn, 999, "next").unwrap().is_none());
+        assert!(get_first_media(&conn, root).unwrap().is_none());
+    }
+
+    #[test]
+    fn neighbor_single_item_wraps_to_self() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\one");
+        let id = seed_media(&conn, root, r"C:\one\a.jpg", "a.jpg", r"C:\one");
+        let next = get_neighbor(&conn, id, "next").unwrap().expect("next");
+        let prev = get_neighbor(&conn, id, "prev").unwrap().expect("prev");
+        assert_eq!(next.id, id);
+        assert_eq!(prev.id, id);
+    }
+
+    #[test]
+    fn neighbor_three_items_wrap_ends() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\three");
+        let a = seed_media(&conn, root, r"C:\three\a.jpg", "a.jpg", r"C:\three");
+        let b = seed_media(&conn, root, r"C:\three\b.jpg", "b.jpg", r"C:\three");
+        let c = seed_media(&conn, root, r"C:\three\c.jpg", "c.jpg", r"C:\three");
+
+        assert_eq!(get_neighbor(&conn, a, "next").unwrap().unwrap().id, b);
+        assert_eq!(get_neighbor(&conn, b, "next").unwrap().unwrap().id, c);
+        assert_eq!(get_neighbor(&conn, c, "next").unwrap().unwrap().id, a); // wrap
+
+        assert_eq!(get_neighbor(&conn, a, "prev").unwrap().unwrap().id, c); // wrap
+        assert_eq!(get_neighbor(&conn, b, "prev").unwrap().unwrap().id, a);
+        assert_eq!(get_neighbor(&conn, c, "prev").unwrap().unwrap().id, b);
+    }
+
+    #[test]
+    fn get_random_parent_dir_constrained() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\lib");
+        let _ = seed_media(&conn, root, r"C:\lib\x\1.jpg", r"x\1.jpg", r"C:\lib\x");
+        let _ = seed_media(&conn, root, r"C:\lib\x\2.jpg", r"x\2.jpg", r"C:\lib\x");
+        let y = seed_media(&conn, root, r"C:\lib\y\3.jpg", r"y\3.jpg", r"C:\lib\y");
+
+        // Only one item in y — random must return it.
+        for _ in 0..8 {
+            let item = get_random(&conn, root, Some(r"C:\lib\y"))
+                .unwrap()
+                .expect("random y");
+            assert_eq!(item.id, y);
+            assert_eq!(item.parent_dir, r"C:\lib\y");
+        }
+
+        // Empty dir filter → None
+        assert!(get_random(&conn, root, Some(r"C:\lib\z")).unwrap().is_none());
+    }
+}
+

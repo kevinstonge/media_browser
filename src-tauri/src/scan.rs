@@ -34,64 +34,89 @@ pub fn classify_ext(ext: &str) -> Option<&'static str> {
     }
 }
 
-fn mtime_ms(path: &Path) -> Option<i64> {
-    path.metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
+/// Size + mtime from a single metadata() call.
+fn file_stats(path: &Path) -> (Option<i64>, Option<i64>) {
+    match path.metadata() {
+        Ok(m) => {
+            let size = Some(m.len() as i64);
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            (size, mtime)
+        }
+        Err(_) => (None, None),
+    }
 }
 
-fn size_bytes(path: &Path) -> Option<i64> {
-    path.metadata().ok().map(|m| m.len() as i64)
+/// Stable path string for DB storage / seen-set membership.
+/// Absolute → canonicalize when possible → strip `\\?\` (dunce) → Windows drive letter uppercased.
+pub fn normalize_path_str(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let resolved = abs.canonicalize().unwrap_or(abs);
+    let simplified = dunce::simplified(&resolved);
+    let mut s = simplified.to_string_lossy().into_owned();
+
+    // Windows: stable drive-letter case so UNIQUE + seen-set stay consistent.
+    #[cfg(windows)]
+    {
+        if s.len() >= 2 {
+            let bytes = s.as_bytes();
+            if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+                // SAFETY: we only touch the first ASCII letter.
+                let mut chars: Vec<char> = s.chars().collect();
+                if let Some(c0) = chars.get_mut(0) {
+                    *c0 = c0.to_ascii_uppercase();
+                }
+                s = chars.into_iter().collect();
+            }
+        }
+    }
+
+    s
 }
 
-/// Normalize to an absolute path string (forward-slash free; Windows native separators).
+/// Normalize root folder path for storage.
 pub fn normalize_root(path: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(path.trim());
     if p.as_os_str().is_empty() {
         return Err("empty path".into());
     }
-    let abs = if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir()
-            .map_err(|e| format!("cwd: {e}"))?
-            .join(p)
-    };
-    // Prefer canonicalize when the folder exists; fall back to absolute otherwise.
-    match abs.canonicalize() {
-        Ok(c) => {
-            // Windows canonicalize may prefix \\?\ — strip for display/storage consistency.
-            let s = c.to_string_lossy();
-            let stripped = s
-                .strip_prefix(r"\\?\")
-                .map(|x| PathBuf::from(x))
-                .unwrap_or(c);
-            Ok(stripped)
-        }
-        Err(_) => Ok(abs),
-    }
-}
-
-fn path_to_string(p: &Path) -> String {
-    p.to_string_lossy().to_string()
+    let s = normalize_path_str(&p);
+    Ok(PathBuf::from(s))
 }
 
 /// Upsert root_dir, record usage, walk filesystem, upsert media, soft-flag missing.
+///
+/// Entire scan (root metadata + media + missing flags + active_root_id) runs in one
+/// transaction. Walk I/O errors abort before soft-missing so incomplete walks never
+/// false-flag existing files.
 pub fn scan_root(conn: &Connection, root_path: &str) -> Result<ScanResult, String> {
     let root = normalize_root(root_path)?;
     if !root.is_dir() {
         return Err(format!("not a directory: {}", root.display()));
     }
-    let root_str = path_to_string(&root);
-    // Use SQLite datetime for human-readable timestamps stored in last_scanned / created_at.
+    let root_str = normalize_path_str(&root);
+
     let ts: String = conn
         .query_row("SELECT datetime('now')", [], |r| r.get(0))
         .map_err(|e| format!("datetime: {e}"))?;
 
+    // Single transaction for all side effects (root, usage, active, media, missing, last_scanned).
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("begin tx: {e}"))?;
+
     // 1. Upsert root_dir
-    conn.execute(
+    tx.execute(
         "INSERT INTO root_dir (path, created_at, last_scanned)
          VALUES (?1, ?2, NULL)
          ON CONFLICT(path) DO NOTHING",
@@ -99,7 +124,7 @@ pub fn scan_root(conn: &Connection, root_path: &str) -> Result<ScanResult, Strin
     )
     .map_err(|e| format!("upsert root_dir: {e}"))?;
 
-    let root_id: i64 = conn
+    let root_id: i64 = tx
         .query_row(
             "SELECT id FROM root_dir WHERE path = ?1",
             params![root_str],
@@ -108,35 +133,36 @@ pub fn scan_root(conn: &Connection, root_path: &str) -> Result<ScanResult, Strin
         .map_err(|e| format!("select root_id: {e}"))?;
 
     // 2. root_usage
-    conn.execute(
+    tx.execute(
         "INSERT INTO root_usage (root_dir_id, used_at) VALUES (?1, ?2)",
         params![root_id, ts],
     )
     .map_err(|e| format!("insert root_usage: {e}"))?;
 
-    // Active root setting
+    // 3. active_root_id (only committed with a successful full scan)
     let active_json = serde_json::to_string(&root_id).map_err(|e| e.to_string())?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO setting (key, value) VALUES ('active_root_id', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![active_json],
     )
     .map_err(|e| format!("set active_root_id: {e}"))?;
 
-    // 3–4. Walk + upsert inside a transaction
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("begin tx: {e}"))?;
-
+    // 4. Walk + upsert
     let mut seen: HashSet<String> = HashSet::new();
     let mut scanned: u64 = 0;
     let mut upserted: u64 = 0;
+    let mut walk_errors: Vec<String> = Vec::new();
 
-    for entry in WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&root).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                walk_errors.push(err.to_string());
+                continue;
+            }
+        };
+
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -153,22 +179,21 @@ pub fn scan_root(conn: &Connection, root_path: &str) -> Result<ScanResult, Strin
             None => continue,
         };
 
-        let abs = path_to_string(path);
+        // Same normalizer as root / DB so seen-set and UNIQUE path match across scans.
+        let abs = normalize_path_str(path);
         let filename = path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
         let parent_dir = path
             .parent()
-            .map(path_to_string)
+            .map(normalize_path_str)
             .unwrap_or_else(|| root_str.clone());
         let rel_path = path
             .strip_prefix(&root)
-            .map(path_to_string)
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| filename.clone());
-        // Normalize rel_path separators to `\` on Windows is fine; store as-is for alpha sort.
-        let size = size_bytes(path);
-        let mtime = mtime_ms(path);
+        let (size, mtime) = file_stats(path);
 
         seen.insert(abs.clone());
 
@@ -206,8 +231,16 @@ pub fn scan_root(conn: &Connection, root_path: &str) -> Result<ScanResult, Strin
         upserted += 1;
     }
 
-    // Soft-missing: paths under this root not seen this scan
-    // Do not wipe tags; keep the row.
+    // Fail closed: incomplete walk must not soft-flag unseen paths as missing.
+    if !walk_errors.is_empty() {
+        let first = &walk_errors[0];
+        return Err(format!(
+            "scan incomplete ({} walk error(s)); soft-missing skipped. First error: {first}",
+            walk_errors.len()
+        ));
+    }
+
+    // Soft-missing: paths under this root not seen this scan (tags preserved).
     let mut missing_marked: u64 = 0;
     {
         let mut stmt = tx
@@ -268,5 +301,19 @@ mod tests {
         assert_eq!(classify_ext("mp4"), Some("video"));
         assert_eq!(classify_ext("txt"), None);
         assert_eq!(classify_ext("exe"), None);
+    }
+
+    #[test]
+    fn normalize_strips_empty_and_uppercases_drive_on_windows() {
+        #[cfg(windows)]
+        {
+            // Non-existent path still becomes absolute-ish string with upper drive if present.
+            let p = PathBuf::from(r"c:\Some\Path");
+            let s = normalize_path_str(&p);
+            assert!(
+                s.starts_with(r"C:\") || s.starts_with("C:/"),
+                "expected upper drive letter, got {s}"
+            );
+        }
     }
 }

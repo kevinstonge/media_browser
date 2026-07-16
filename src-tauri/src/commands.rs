@@ -9,11 +9,18 @@ use crate::scan::{self, ScanResult};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-/// Native directory picker. Returns absolute path or null if cancelled.
+/// Native directory picker. Returns absolute filesystem path or null if cancelled.
 #[tauri::command]
 pub fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
-    let folder = app.dialog().file().blocking_pick_folder();
-    Ok(folder.map(|p| p.to_string()))
+    let Some(folder) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    // Prefer into_path over Display so Url variants become real FS paths; simplify UNC/`\\?\`.
+    let path = folder
+        .simplified()
+        .into_path()
+        .map_err(|e| format!("folder path: {e}"))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 /// Most recently active / used root with scan label hints.

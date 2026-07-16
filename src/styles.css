@@ -158,8 +158,8 @@ body {
 
 .settings-chrome:hover .settings-gear,
 .settings-gear:focus-visible,
-.settings-panel:not([hidden]) ~ .settings-gear,
-.settings-chrome:focus-within .settings-gear {
+.settings-chrome:focus-within .settings-gear,
+.settings-chrome:has(#settings-panel:not([hidden])) .settings-gear {
   opacity: 1;
   color: #eee;
   background: rgba(30, 30, 30, 0.75);

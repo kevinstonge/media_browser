@@ -1742,6 +1742,7 @@ dependencies = [
 name = "media-browser"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "rusqlite",
  "serde",
  "serde_json",
