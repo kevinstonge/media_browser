@@ -1,4 +1,6 @@
+mod commands;
 mod db;
+mod scan;
 
 use db::{db_health, open_and_migrate, DbState};
 use std::sync::Mutex;
@@ -7,6 +9,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let conn = open_and_migrate(app.handle()).map_err(|e| {
                 Box::<dyn std::error::Error>::from(e)
@@ -14,7 +17,19 @@ pub fn run() {
             app.manage(DbState(Mutex::new(conn)));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![db_health])
+        .invoke_handler(tauri::generate_handler![
+            db_health,
+            commands::pick_folder,
+            commands::get_last_root,
+            commands::get_root_info,
+            commands::settings_get,
+            commands::settings_set,
+            commands::scan_root,
+            commands::get_media,
+            commands::get_first_media,
+            commands::get_neighbor,
+            commands::get_random,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -28,6 +28,8 @@ body {
   justify-content: center;
 }
 
+/* ---- Stage ---- */
+
 .stage {
   width: 100%;
   height: 100%;
@@ -35,7 +37,73 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  overflow: hidden;
 }
+
+.stage-media-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage-media {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #000;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.stage-image {
+  pointer-events: none;
+}
+
+.stage-video {
+  outline: none;
+}
+
+.stage-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.stage-empty[hidden] {
+  display: none;
+}
+
+.stage-empty-card {
+  text-align: center;
+  max-width: 28rem;
+  padding: 1.5rem 2rem;
+  color: #aaa;
+}
+
+.stage-empty-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #ddd;
+  margin-bottom: 0.5rem;
+}
+
+.stage-empty-body {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: #777;
+  word-break: break-word;
+}
+
+/* ---- Status ---- */
 
 .status {
   position: absolute;
@@ -43,12 +111,162 @@ body {
   left: 50%;
   transform: translateX(-50%);
   font-size: 12px;
-  color: #666;
+  color: #888;
   opacity: 0;
   transition: opacity 0.3s ease;
   pointer-events: none;
+  z-index: 20;
+  max-width: 80vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 4px 10px;
+  border-radius: 4px;
 }
 
 .status.visible {
   opacity: 1;
+}
+
+/* ---- Settings chrome (hover-reveal gear) ---- */
+
+.settings-chrome {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 30;
+  /* padded hit region ~10px */
+  padding: 10px;
+}
+
+.settings-gear {
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #666;
+  font-size: 1.35rem;
+  cursor: pointer;
+  opacity: 0.25;
+  transition: opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-chrome:hover .settings-gear,
+.settings-gear:focus-visible,
+.settings-panel:not([hidden]) ~ .settings-gear,
+.settings-chrome:focus-within .settings-gear {
+  opacity: 1;
+  color: #eee;
+  background: rgba(30, 30, 30, 0.75);
+}
+
+.settings-panel {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 10px;
+  width: min(360px, 90vw);
+  padding: 14px 16px 16px;
+  background: rgba(22, 22, 24, 0.96);
+  border: 1px solid #333;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  color: #ddd;
+  pointer-events: auto;
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.settings-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #f0f0f0;
+}
+
+.settings-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+  margin-bottom: 6px;
+}
+
+.settings-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+.settings-row-actions {
+  margin-bottom: 4px;
+}
+
+.settings-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  padding: 8px 10px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #ccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.settings-path.is-empty {
+  color: #666;
+  font-style: italic;
+}
+
+.settings-btn {
+  flex-shrink: 0;
+  border: 1px solid #444;
+  background: #2a2a2e;
+  color: #eee;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-btn:hover:not(:disabled) {
+  background: #3a3a40;
+  border-color: #666;
+}
+
+.settings-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.settings-btn-primary {
+  width: 100%;
+  background: #2d4a7a;
+  border-color: #3d6ab0;
+}
+
+.settings-btn-primary:hover:not(:disabled) {
+  background: #3a5f9a;
+  border-color: #5a8ad0;
+}
+
+.settings-hint {
+  margin: 8px 0 0;
+  font-size: 0.72rem;
+  color: #666;
+  line-height: 1.35;
 }

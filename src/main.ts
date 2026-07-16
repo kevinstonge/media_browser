@@ -1,5 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dbHealth } from "./app/api";
+import { mountSettings } from "./app/ui/settings";
+import { mountStage } from "./app/ui/stage";
 
 const appWindow = getCurrentWindow();
 
@@ -41,7 +43,6 @@ async function quitApp(): Promise<void> {
 
 function wireKeyboard(): void {
   window.addEventListener("keydown", (e) => {
-    // Ignore when typing in form fields (future settings UI)
     const target = e.target as HTMLElement | null;
     if (
       target &&
@@ -61,10 +62,7 @@ function wireKeyboard(): void {
     if (e.key === "Escape") {
       e.preventDefault();
       void (async () => {
-        const exited = await exitFullscreenIfNeeded();
-        if (!exited) {
-          // Esc when not fullscreen: no-op for now (quit via Ctrl+Q)
-        }
+        await exitFullscreenIfNeeded();
       })();
       return;
     }
@@ -79,11 +77,19 @@ function wireKeyboard(): void {
 async function init(): Promise<void> {
   wireKeyboard();
 
+  const stageRoot = document.querySelector<HTMLElement>("#stage");
+  const appRoot = document.querySelector<HTMLElement>("#app");
+  if (stageRoot) {
+    mountStage(stageRoot);
+  }
+  if (appRoot) {
+    mountSettings(appRoot, setStatus);
+  }
+
   try {
     const health = await dbHealth();
     setStatus(`DB ready · ${health}`, true);
-    // Fade status after a few seconds
-    window.setTimeout(() => setStatus("", false), 4000);
+    window.setTimeout(() => setStatus("", false), 2500);
   } catch (err) {
     console.error("DB health check failed:", err);
     setStatus(`DB error: ${formatError(err)}`, true);

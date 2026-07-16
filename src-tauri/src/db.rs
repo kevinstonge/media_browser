@@ -1,8 +1,9 @@
-//! SQLite open + v1 schema migration runner.
+//! SQLite open + v1 schema migration runner + media/root query helpers.
 //! DB path: app data dir / library.db (e.g. %APPDATA%/com.mediabrowser.app/library.db
 //! or identifier-based path via Tauri path API).
 
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -81,6 +82,58 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 "#;
 
+// --- DTOs -------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaItem {
+    pub id: i64,
+    pub root_dir_id: i64,
+    pub path: String,
+    pub filename: String,
+    pub parent_dir: String,
+    pub rel_path: String,
+    pub media_type: String,
+    pub ext: String,
+    pub size_bytes: Option<i64>,
+    pub mtime_ms: Option<i64>,
+    pub is_missing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootInfo {
+    pub id: i64,
+    pub path: String,
+    pub last_scanned: Option<String>,
+    pub item_count: i64,
+    /// True when Scan label should show; false → Re-scan.
+    pub needs_scan: bool,
+}
+
+fn map_media_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
+    let is_missing_i: i64 = row.get(10)?;
+    Ok(MediaItem {
+        id: row.get(0)?,
+        root_dir_id: row.get(1)?,
+        path: row.get(2)?,
+        filename: row.get(3)?,
+        parent_dir: row.get(4)?,
+        rel_path: row.get(5)?,
+        media_type: row.get(6)?,
+        ext: row.get(7)?,
+        size_bytes: row.get(8)?,
+        mtime_ms: row.get(9)?,
+        is_missing: is_missing_i != 0,
+    })
+}
+
+const MEDIA_SELECT: &str = "SELECT id, root_dir_id, path, filename, parent_dir, rel_path,
+        media_type, ext, size_bytes, mtime_ms, is_missing
+     FROM media_item";
+
+// --- Open / migrate ---------------------------------------------------------
+
 fn app_data_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -108,15 +161,12 @@ fn is_migration_applied(conn: &Connection, version: i64) -> SqlResult<bool> {
 }
 
 fn run_migrations(conn: &Connection) -> SqlResult<()> {
-    // Connection-level; not transactional.
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-    // Skip DDL entirely once v1 has been recorded.
     if is_migration_applied(conn, 1)? {
         return Ok(());
     }
 
-    // Atomic apply: all v1 objects + version stamp, or roll back on failure.
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(MIGRATION_V1)?;
     tx.execute(
@@ -170,4 +220,236 @@ pub fn db_health(state: State<'_, DbState>) -> Result<String, String> {
         .map_err(|e| format!("migration check: {e}"))?;
 
     Ok(format!("sqlite {version}; schema v{migration}; tables ok"))
+}
+
+// --- Settings ---------------------------------------------------------------
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM setting WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("get_setting: {e}"))
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| format!("set_setting: {e}"))?;
+    Ok(())
+}
+
+// --- Root helpers -----------------------------------------------------------
+
+pub fn root_info(conn: &Connection, root_id: i64) -> Result<Option<RootInfo>, String> {
+    let row = conn
+        .query_row(
+            "SELECT id, path, last_scanned FROM root_dir WHERE id = ?1",
+            params![root_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("root_info: {e}"))?;
+
+    let Some((id, path, last_scanned)) = row else {
+        return Ok(None);
+    };
+
+    let item_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM media_item WHERE root_dir_id = ?1 AND is_missing = 0",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("item_count: {e}"))?;
+
+    let needs_scan = last_scanned.is_none() || item_count == 0;
+
+    Ok(Some(RootInfo {
+        id,
+        path,
+        last_scanned,
+        item_count,
+        needs_scan,
+    }))
+}
+
+pub fn get_last_root(conn: &Connection) -> Result<Option<RootInfo>, String> {
+    // Prefer active_root_id setting; fall back to most recent root_usage.
+    if let Some(raw) = get_setting(conn, "active_root_id")? {
+        if let Ok(id) = serde_json::from_str::<i64>(&raw) {
+            if let Some(info) = root_info(conn, id)? {
+                return Ok(Some(info));
+            }
+        } else if raw == "null" {
+            // explicit null
+        }
+    }
+
+    let last_id: Option<i64> = conn
+        .query_row(
+            "SELECT root_dir_id FROM root_usage ORDER BY used_at DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("last root_usage: {e}"))?;
+
+    match last_id {
+        Some(id) => root_info(conn, id),
+        None => Ok(None),
+    }
+}
+
+// --- Media queries ----------------------------------------------------------
+
+pub fn get_media(conn: &Connection, id: i64) -> Result<Option<MediaItem>, String> {
+    conn.query_row(
+        &format!("{MEDIA_SELECT} WHERE id = ?1"),
+        params![id],
+        map_media_row,
+    )
+    .optional()
+    .map_err(|e| format!("get_media: {e}"))
+}
+
+pub fn get_first_media(conn: &Connection, root_id: i64) -> Result<Option<MediaItem>, String> {
+    conn.query_row(
+        &format!(
+            "{MEDIA_SELECT}
+             WHERE root_dir_id = ?1 AND is_missing = 0
+             ORDER BY rel_path COLLATE NOCASE ASC
+             LIMIT 1"
+        ),
+        params![root_id],
+        map_media_row,
+    )
+    .optional()
+    .map_err(|e| format!("get_first_media: {e}"))
+}
+
+/// Alpha neighbor by rel_path COLLATE NOCASE. direction: "next" | "prev". Wraps.
+pub fn get_neighbor(
+    conn: &Connection,
+    id: i64,
+    direction: &str,
+) -> Result<Option<MediaItem>, String> {
+    let current = match get_media(conn, id)? {
+        Some(m) if !m.is_missing => m,
+        Some(m) => {
+            // Missing current: still navigate within its root
+            m
+        }
+        None => return Ok(None),
+    };
+    let root_id = current.root_dir_id;
+    let rel = &current.rel_path;
+
+    let dir = direction.to_ascii_lowercase();
+    let neighbor = match dir.as_str() {
+        "next" | "forward" | "right" => {
+            let next = conn
+                .query_row(
+                    &format!(
+                        "{MEDIA_SELECT}
+                         WHERE root_dir_id = ?1 AND is_missing = 0
+                           AND rel_path COLLATE NOCASE > ?2
+                         ORDER BY rel_path COLLATE NOCASE ASC
+                         LIMIT 1"
+                    ),
+                    params![root_id, rel],
+                    map_media_row,
+                )
+                .optional()
+                .map_err(|e| format!("neighbor next: {e}"))?;
+            match next {
+                Some(m) => Some(m),
+                None => get_first_media(conn, root_id)?, // wrap
+            }
+        }
+        "prev" | "previous" | "back" | "left" => {
+            let prev = conn
+                .query_row(
+                    &format!(
+                        "{MEDIA_SELECT}
+                         WHERE root_dir_id = ?1 AND is_missing = 0
+                           AND rel_path COLLATE NOCASE < ?2
+                         ORDER BY rel_path COLLATE NOCASE DESC
+                         LIMIT 1"
+                    ),
+                    params![root_id, rel],
+                    map_media_row,
+                )
+                .optional()
+                .map_err(|e| format!("neighbor prev: {e}"))?;
+            match prev {
+                Some(m) => Some(m),
+                None => {
+                    // wrap to last
+                    conn.query_row(
+                        &format!(
+                            "{MEDIA_SELECT}
+                             WHERE root_dir_id = ?1 AND is_missing = 0
+                             ORDER BY rel_path COLLATE NOCASE DESC
+                             LIMIT 1"
+                        ),
+                        params![root_id],
+                        map_media_row,
+                    )
+                    .optional()
+                    .map_err(|e| format!("neighbor last: {e}"))?
+                }
+            }
+        }
+        other => return Err(format!("unknown direction: {other}")),
+    };
+
+    Ok(neighbor)
+}
+
+/// Uniform random among non-missing items in root; optional parent_dir filter.
+pub fn get_random(
+    conn: &Connection,
+    root_id: i64,
+    parent_dir: Option<&str>,
+) -> Result<Option<MediaItem>, String> {
+    match parent_dir {
+        Some(pd) => conn
+            .query_row(
+                &format!(
+                    "{MEDIA_SELECT}
+                     WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                     ORDER BY RANDOM()
+                     LIMIT 1"
+                ),
+                params![root_id, pd],
+                map_media_row,
+            )
+            .optional()
+            .map_err(|e| format!("get_random dir: {e}")),
+        None => conn
+            .query_row(
+                &format!(
+                    "{MEDIA_SELECT}
+                     WHERE root_dir_id = ?1 AND is_missing = 0
+                     ORDER BY RANDOM()
+                     LIMIT 1"
+                ),
+                params![root_id],
+                map_media_row,
+            )
+            .optional()
+            .map_err(|e| format!("get_random: {e}")),
+    }
 }

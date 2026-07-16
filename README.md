@@ -84,7 +84,9 @@ media_browser/
     src/
       main.rs
       lib.rs
-      db.rs           # open DB + migrations
+      db.rs           # open DB + migrations + media queries
+      scan.rs         # recursive walk + upsert
+      commands.rs     # Tauri IPC
     Cargo.toml
     tauri.conf.json
   src/                # Frontend (Vite + vanilla TS)
@@ -93,7 +95,7 @@ media_browser/
     app/
       api.ts
       state.ts
-      ui/             # stubs for later PRs
+      ui/             # stage, settings (partial); later: tags/slideshow
   package.json
   vite.config.ts
   tsconfig.json
@@ -105,7 +107,9 @@ media_browser/
 
 **PR 1 — Scaffold:** black shell, fullscreen/quit keys, SQLite open + schema migrations.
 
-Later phases: scan, navigation, slideshow, tags, Open with… / VLC. See `PLAN.md`.
+**PR 2 — Scan + DB browse skeleton:** folder picker, recursive scan/re-scan, first media on stage (asset protocol), settings path + Scan/Re-scan label, neighbor/random backend commands.
+
+Later phases: navigation UX, slideshow, tags, Open with… / VLC. See `PLAN.md`.
 
 ## License
 
