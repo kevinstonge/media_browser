@@ -3,6 +3,18 @@
  */
 
 import type { MediaItem, RootInfo } from "./api";
+import {
+  clearHistory as clearHistoryBag,
+  commitHistoryBack as commitBackBag,
+  commitHistoryForward as commitForwardBag,
+  createHistory,
+  peekHistoryBack as peekBackBag,
+  peekHistoryForward as peekForwardBag,
+  pushHistory as pushHistoryBag,
+  resetHistory as resetHistoryBag,
+  unshiftHistory as unshiftHistoryBag,
+  type HistoryBag,
+} from "./history";
 
 export type NavMode = "alpha" | "random_root" | "random_current_dir";
 
@@ -30,6 +42,8 @@ export interface AppState {
   historyCursor: number;
 }
 
+const hist0 = createHistory();
+
 export const state: AppState = {
   currentMediaId: null,
   currentMedia: null,
@@ -40,9 +54,14 @@ export const state: AppState = {
   navigating: false,
   stageEmpty: "no_root",
   statusMessage: "",
-  history: [],
-  historyCursor: -1,
+  history: hist0.history,
+  historyCursor: hist0.historyCursor,
 };
+
+/** View of global history fields as a HistoryBag (shared arrays/cursor). */
+function hist(): HistoryBag {
+  return state;
+}
 
 export function setCurrentMedia(item: MediaItem | null): void {
   state.currentMedia = item;
@@ -51,57 +70,35 @@ export function setCurrentMedia(item: MediaItem | null): void {
 
 /** Direct jump (scan, restore, pick): history becomes [id], cursor 0. */
 export function resetHistory(id: number): void {
-  state.history = [id];
-  state.historyCursor = 0;
+  resetHistoryBag(hist(), id);
 }
 
 export function clearHistory(): void {
-  state.history = [];
-  state.historyCursor = -1;
+  clearHistoryBag(hist());
 }
 
-/**
- * Append a newly visited id after truncating any forward branch.
- * No-op if id is already the tip at cursor.
- */
 export function pushHistory(id: number): void {
-  if (state.historyCursor >= 0 && state.history[state.historyCursor] === id) {
-    // Already showing this id at cursor — drop any forward entries only if needed.
-    if (state.historyCursor < state.history.length - 1) {
-      state.history = state.history.slice(0, state.historyCursor + 1);
-    }
-    return;
-  }
-  if (state.historyCursor < state.history.length - 1) {
-    state.history = state.history.slice(0, state.historyCursor + 1);
-  }
-  state.history.push(id);
-  state.historyCursor = state.history.length - 1;
+  pushHistoryBag(hist(), id);
 }
 
-/** Move cursor back one step. Returns id or null if already at start. */
-export function historyBack(): number | null {
-  if (state.historyCursor <= 0) return null;
-  state.historyCursor -= 1;
-  return state.history[state.historyCursor] ?? null;
+export function peekHistoryBack(): number | null {
+  return peekBackBag(hist());
 }
 
-/** Move cursor forward one step. Returns id or null if already at tip. */
-export function historyForward(): number | null {
-  if (state.historyCursor < 0) return null;
-  if (state.historyCursor >= state.history.length - 1) return null;
-  state.historyCursor += 1;
-  return state.history[state.historyCursor] ?? null;
+export function peekHistoryForward(): number | null {
+  return peekForwardBag(hist());
 }
 
-/** Prepend id when alpha-preving past the start of history. */
+export function commitHistoryBack(): void {
+  commitBackBag(hist());
+}
+
+export function commitHistoryForward(): void {
+  commitForwardBag(hist());
+}
+
 export function unshiftHistory(id: number): void {
-  if (state.history[0] === id) {
-    state.historyCursor = 0;
-    return;
-  }
-  state.history.unshift(id);
-  state.historyCursor = 0;
+  unshiftHistoryBag(hist(), id);
 }
 
 export function isNavMode(value: unknown): value is NavMode {
