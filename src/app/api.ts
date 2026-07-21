@@ -52,6 +52,11 @@ export interface ScanResult {
   missingMarked: number;
 }
 
+/** Payload for throttled `scan-progress` events during scan/re-scan. */
+export interface ScanProgress {
+  files: number;
+}
+
 export async function pickFolder(): Promise<string | null> {
   return invoke<string | null>("pick_folder");
 }

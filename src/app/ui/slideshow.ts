@@ -54,6 +54,12 @@ import {
   type NavScope,
 } from "../state";
 import {
+  armToolbarHideDelay,
+  clearToolbarHideDelay,
+  mountToolbarAutoHide,
+  notifyToolbarDropdownChanged,
+} from "./chrome";
+import {
   openRescanRootFolderModal,
   openSelectRootFolderModal,
 } from "./rootFolder";
@@ -69,6 +75,7 @@ let rootBtn: HTMLButtonElement | null = null;
 let rootMenu: HTMLElement | null = null;
 let folderBtn: HTMLButtonElement | null = null;
 let folderMenu: HTMLElement | null = null;
+let folderLabel: HTMLElement | null = null;
 let fileBtn: HTMLButtonElement | null = null;
 let fileMenu: HTMLElement | null = null;
 let fileLabel: HTMLElement | null = null;
@@ -113,28 +120,29 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
       <div class="toolbar-menu-wrap" id="toolbar-folder-wrap">
         <button
           type="button"
-          class="toolbar-icon-btn"
+          class="toolbar-select-btn"
           id="toolbar-folder-btn"
           title="Select folder"
           aria-label="Select folder"
           aria-haspopup="listbox"
           aria-expanded="false"
         >
-          <span class="toolbar-folder-icon" aria-hidden="true">📁</span>
+          <span class="toolbar-select-label" id="toolbar-folder-label">No folder</span>
+          <span class="toolbar-caret" aria-hidden="true">▾</span>
         </button>
-        <div class="toolbar-dropdown" id="toolbar-folder-menu" role="listbox" aria-label="Folders" hidden></div>
+        <div class="toolbar-dropdown toolbar-dropdown-folders" id="toolbar-folder-menu" role="listbox" aria-label="Folders" hidden></div>
       </div>
       <div class="toolbar-menu-wrap" id="toolbar-file-wrap">
         <button
           type="button"
-          class="toolbar-file-btn"
+          class="toolbar-select-btn"
           id="toolbar-file-btn"
           title="Select file"
           aria-label="Select file"
           aria-haspopup="listbox"
           aria-expanded="false"
         >
-          <span class="toolbar-file-label" id="toolbar-file-label">No file</span>
+          <span class="toolbar-select-label" id="toolbar-file-label">No file</span>
           <span class="toolbar-caret" aria-hidden="true">▾</span>
         </button>
         <div class="toolbar-dropdown toolbar-dropdown-files" id="toolbar-file-menu" role="listbox" aria-label="Files" hidden></div>
@@ -203,6 +211,7 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   rootMenu = chrome.querySelector("#toolbar-root-menu");
   folderBtn = chrome.querySelector("#toolbar-folder-btn");
   folderMenu = chrome.querySelector("#toolbar-folder-menu");
+  folderLabel = chrome.querySelector("#toolbar-folder-label");
   fileBtn = chrome.querySelector("#toolbar-file-btn");
   fileMenu = chrome.querySelector("#toolbar-file-menu");
   fileLabel = chrome.querySelector("#toolbar-file-label");
@@ -250,13 +259,22 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
     void toggleFullscreen();
   });
 
-  scopeSelect?.addEventListener("change", () => {
+  // Native <select>s keep focus (and a focus ring) after a pick, which would
+  // pin the toolbar open via isToolbarSelectFocused. Blur so auto-hide can run;
+  // armToolbarHideDelay still holds the bar for 3s after the selection.
+  scopeSelect?.addEventListener("change", (e) => {
+    armToolbarHideDelay();
+    (e.currentTarget as HTMLSelectElement).blur();
     void onScopeOrOrderChange();
   });
-  orderSelect?.addEventListener("change", () => {
+  orderSelect?.addEventListener("change", (e) => {
+    armToolbarHideDelay();
+    (e.currentTarget as HTMLSelectElement).blur();
     void onScopeOrOrderChange();
   });
-  durationSelect?.addEventListener("change", () => {
+  durationSelect?.addEventListener("change", (e) => {
+    armToolbarHideDelay();
+    (e.currentTarget as HTMLSelectElement).blur();
     void onDurationSelectChange();
   });
 
@@ -306,8 +324,12 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   });
 
   updateControls();
+  updateFolderLabel();
   updateFileLabel();
   updateNavSelects();
+
+  // Pointer-Y auto-hide: top H zone, open menus, 3s post-selection hold.
+  mountToolbarAutoHide(root, chrome);
 }
 
 /**
@@ -315,6 +337,7 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
  * Safe to call often; only re-fetches lists when a menu is open.
  */
 export function refreshToolbarChrome(): void {
+  updateFolderLabel();
   updateFileLabel();
   updateNavSelects();
   updateResetHistoryButton();
@@ -346,8 +369,12 @@ function updateResetHistoryButton(): void {
 /**
  * Close every toolbar dropdown (folder, file, tags, …) and reset aria-expanded.
  * Exported so other chrome (e.g. tag menu) can collapse siblings before opening.
+ *
+ * @param afterSelection When true, hold the toolbar visible for 3s (cursor may
+ *   be below the top reveal zone after choosing a menu item). When false/omitted,
+ *   cancel any pending hold so dismiss (outside click / Esc) hides immediately.
  */
-export function closeToolbarMenus(): void {
+export function closeToolbarMenus(options?: { afterSelection?: boolean }): void {
   if (!chromeEl) return;
   chromeEl.querySelectorAll<HTMLElement>(".toolbar-dropdown").forEach((el) => {
     el.hidden = true;
@@ -355,10 +382,16 @@ export function closeToolbarMenus(): void {
   chromeEl.querySelectorAll("[aria-expanded='true']").forEach((el) => {
     el.setAttribute("aria-expanded", "false");
   });
+  if (options?.afterSelection) {
+    armToolbarHideDelay();
+  } else {
+    clearToolbarHideDelay();
+  }
+  notifyToolbarDropdownChanged();
 }
 
-function closeMenus(): void {
-  closeToolbarMenus();
+function closeMenus(options?: { afterSelection?: boolean }): void {
+  closeToolbarMenus(options);
 }
 
 function toggleRootMenu(): void {
@@ -369,6 +402,7 @@ function toggleRootMenu(): void {
   populateRootMenu();
   rootMenu.hidden = false;
   rootBtn.setAttribute("aria-expanded", "true");
+  notifyToolbarDropdownChanged();
 }
 
 function populateRootMenu(): void {
@@ -386,7 +420,7 @@ function populateRootMenu(): void {
   selectBtn.disabled = scanning;
   selectBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    closeMenus();
+    closeMenus({ afterSelection: true });
     openSelectRootFolderModal();
   });
   rootMenu.appendChild(selectBtn);
@@ -402,7 +436,7 @@ function populateRootMenu(): void {
   }
   rescanBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    closeMenus();
+    closeMenus({ afterSelection: true });
     openRescanRootFolderModal();
   });
   rootMenu.appendChild(rescanBtn);
@@ -416,6 +450,10 @@ async function toggleFolderMenu(): Promise<void> {
   await populateFolderMenu();
   folderMenu.hidden = false;
   folderBtn.setAttribute("aria-expanded", "true");
+  notifyToolbarDropdownChanged();
+  // Scroll current folder into view (same pattern as file menu).
+  const active = folderMenu.querySelector<HTMLElement>(".toolbar-option-active");
+  active?.scrollIntoView({ block: "nearest" });
 }
 
 async function toggleFileMenu(): Promise<void> {
@@ -426,6 +464,7 @@ async function toggleFileMenu(): Promise<void> {
   await populateFileMenu(true);
   fileMenu.hidden = false;
   fileBtn.setAttribute("aria-expanded", "true");
+  notifyToolbarDropdownChanged();
   // Scroll current file into view
   const active = fileMenu.querySelector<HTMLElement>(".toolbar-option-active");
   active?.scrollIntoView({ block: "nearest" });
@@ -545,7 +584,7 @@ async function populateFileMenu(force = false): Promise<void> {
 }
 
 async function onPickFolder(parentDir: string): Promise<void> {
-  closeMenus();
+  closeMenus({ afterSelection: true });
   const root = state.root;
   if (!root) return;
   try {
@@ -570,7 +609,7 @@ async function onPickFolder(parentDir: string): Promise<void> {
 }
 
 async function onPickFile(id: number): Promise<void> {
-  closeMenus();
+  closeMenus({ afterSelection: true });
   if (state.currentMediaId === id) return;
   try {
     const item = await getMedia(id);
@@ -593,6 +632,22 @@ function pathsEqual(a: string, b: string): boolean {
   return a.replace(/[/\\]+$/, "").toLowerCase() === b.replace(/[/\\]+$/, "").toLowerCase();
 }
 
+function updateFolderLabel(): void {
+  if (!folderLabel) return;
+  const parentDir = state.currentMedia?.parentDir;
+  const rootPath = state.root?.path ?? null;
+  if (!parentDir) {
+    folderLabel.textContent = "No folder";
+    folderLabel.title = "";
+    if (folderBtn) folderBtn.title = "Select folder";
+    return;
+  }
+  const label = folderDisplayLabel(parentDir, rootPath);
+  folderLabel.textContent = label;
+  folderLabel.title = parentDir;
+  if (folderBtn) folderBtn.title = parentDir;
+}
+
 function updateFileLabel(): void {
   if (!fileLabel) return;
   const name = state.currentMedia?.filename;
@@ -600,6 +655,7 @@ function updateFileLabel(): void {
   fileLabel.title = state.currentMedia?.path ?? "";
   if (fileBtn) {
     fileBtn.disabled = state.root == null || state.currentMedia == null;
+    fileBtn.title = name && name.length > 0 ? name : "Select file";
   }
   if (folderBtn) {
     folderBtn.disabled = state.root == null || state.root.id <= 0;

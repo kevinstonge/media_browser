@@ -301,23 +301,22 @@ body {
   border-radius: 8px;
   background: transparent;
   border: 1px solid transparent;
-  /* Fully hidden until hover / focus */
+  /* Fully hidden until JS top-zone / open-menu / post-select reveal */
   opacity: 0;
   transition: opacity 0.2s ease, background 0.2s ease, border-color 0.2s ease;
   flex-wrap: nowrap;
   max-width: 100%;
 }
 
-.slideshow-chrome:hover .slideshow-bar,
-.slideshow-chrome:focus-within .slideshow-bar {
-  opacity: 1;
-  background: rgba(22, 22, 24, 0.92);
-  border-color: #333;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
-}
-
-/* Keep bar visible while a dropdown is open (focus may move into menu) */
-.slideshow-chrome:has(.toolbar-dropdown:not([hidden])) .slideshow-bar {
+/*
+ * Reveal rules (see mountToolbarAutoHide in chrome.ts):
+ * - pointer in top H px of the app (H = bar height + 2× natural top pad)
+ * - any .toolbar-dropdown open, or native toolbar <select> focused
+ * - 3s hold after a dropdown item is chosen
+ * Keyboard: keep visible while a focus-visible control is inside the chrome.
+ */
+.slideshow-chrome.toolbar-revealed .slideshow-bar,
+.slideshow-chrome:focus-within:has(:focus-visible) .slideshow-bar {
   opacity: 1;
   background: rgba(22, 22, 24, 0.92);
   border-color: #333;
@@ -330,7 +329,8 @@ body {
   min-width: 0;
 }
 
-/* File selector stays a constant width so the toolbar doesn't jump with names. */
+/* Folder / file selectors: fixed width so the toolbar doesn't jump with names. */
+#toolbar-folder-wrap,
 #toolbar-file-wrap {
   flex: 0 0 180px;
   width: 180px;
@@ -362,11 +362,6 @@ body {
   cursor: not-allowed;
 }
 
-.toolbar-folder-icon {
-  font-size: 1rem;
-  line-height: 1;
-}
-
 /* Root library control: folder + small gear badge */
 .toolbar-root-icon {
   position: relative;
@@ -392,7 +387,8 @@ body {
   filter: drop-shadow(0 0 1px #1a1a1e) drop-shadow(0 0 1px #1a1a1e);
 }
 
-.toolbar-file-btn {
+/* Shared dropdown trigger (folder name / file name + caret). */
+.toolbar-select-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -412,17 +408,17 @@ body {
   flex-shrink: 0;
 }
 
-.toolbar-file-btn:hover:not(:disabled) {
+.toolbar-select-btn:hover:not(:disabled) {
   background: #3a3a40;
   border-color: #666;
 }
 
-.toolbar-file-btn:disabled {
+.toolbar-select-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.toolbar-file-label {
+.toolbar-select-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -455,6 +451,7 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
+.toolbar-dropdown-folders,
 .toolbar-dropdown-files {
   min-width: 180px;
   max-width: min(400px, 75vw);
@@ -992,7 +989,7 @@ body {
 .settings-btn:focus-visible,
 .slideshow-btn:focus-visible,
 .toolbar-icon-btn:focus-visible,
-.toolbar-file-btn:focus-visible,
+.toolbar-select-btn:focus-visible,
 .toolbar-option:focus-visible,
 .toolbar-tag-option:focus-within,
 .toolbar-tag-manage:focus-visible {
@@ -1137,6 +1134,13 @@ body {
   font-size: 0.95rem;
   font-weight: 600;
   color: #f0f0f0;
+}
+
+.root-folder-status-progress {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: #c8d4e8;
+  letter-spacing: 0.01em;
 }
 
 .root-folder-status-detail {

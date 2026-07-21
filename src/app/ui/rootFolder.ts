@@ -2,9 +2,11 @@
  * Root library folder: select + scan / re-scan modals and cold-start restore.
  * Opened from the toolbar (folder+gear control left of the in-library folder picker).
  *
- * Scan is a single backend invoke — no progress events (keeps the walk as fast as possible).
+ * Scan is a single backend invoke. Progress is a throttled file count event
+ * (~4/s) so the UI can update without per-file IPC overhead.
  */
 
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   getFirstMedia,
   getLastRoot,
@@ -16,6 +18,7 @@ import {
   settingsGet,
   type MediaItem,
   type RootInfo,
+  type ScanProgress,
   type ScanResult,
 } from "../api";
 import { jumpToMedia } from "../nav";
@@ -285,7 +288,7 @@ async function renderSelectUi(): Promise<void> {
       >${escapeHtml(pathDisplay)}</div>
       <button type="button" class="settings-btn" id="root-folder-browse">Browse…</button>
     </div>
-    <p class="settings-hint">Choose a library root, then Scan to index images and videos.</p>
+    <p class="settings-hint">Choose a library root, then Scan to index images and videos in each first-level subfolder.</p>
     <div class="root-folder-status" id="root-folder-status" hidden></div>
   `;
 
@@ -326,6 +329,7 @@ function renderSelectScanning(): void {
     <div class="root-folder-status-block" role="status" aria-live="polite">
       <div class="root-folder-spinner" aria-hidden="true"></div>
       <div class="root-folder-status-text">${escapeHtml(label)}</div>
+      <div class="root-folder-status-progress" id="root-folder-scan-progress">Progress: 0 files</div>
       <div class="root-folder-status-path" title="${escapeAttr(path)}">${escapeHtml(path)}</div>
     </div>
   `;
@@ -345,7 +349,7 @@ function renderRescanReady(): void {
     <div class="root-folder-status-block" role="status">
       <div class="root-folder-status-text">Re-scan root folder</div>
       <div class="root-folder-status-detail">
-        Walk the folder tree again and update the library index.
+        Index first-level subfolders again (files only; nested folders skipped).
         ${
           count != null
             ? `<br />Currently ${escapeHtml(String(count))} media in library.`
@@ -382,12 +386,25 @@ function renderRescanScanning(): void {
     <div class="root-folder-status-block" role="status" aria-live="polite">
       <div class="root-folder-spinner" aria-hidden="true"></div>
       <div class="root-folder-status-text">Re-scanning root folder…</div>
+      <div class="root-folder-status-progress" id="root-folder-scan-progress">Progress: 0 files</div>
       <div class="root-folder-status-path" title="${escapeAttr(path)}">${escapeHtml(path)}</div>
     </div>
   `;
   footerEl.innerHTML = `
     <button type="button" class="settings-btn settings-btn-primary" disabled>Re-scanning…</button>
   `;
+}
+
+function formatFileCount(n: number): string {
+  return n.toLocaleString();
+}
+
+/** Update modal + status bar from a throttled backend progress event. */
+function applyScanProgress(files: number): void {
+  const label = `Progress: ${formatFileCount(files)} files`;
+  const el = bodyEl?.querySelector<HTMLElement>("#root-folder-scan-progress");
+  if (el) el.textContent = label;
+  setStatus(label, true);
 }
 
 function renderSuccess(result: ScanResult, info: RootInfo | null): void {
@@ -536,9 +553,14 @@ async function runScan(path: string, scanMode: "select" | "rescan"): Promise<voi
   }
   // Stage shows loading while library is being rebuilt.
   showEmpty("loading");
-  setStatus(scanMode === "rescan" ? "Re-scanning…" : "Scanning…", true);
+  setStatus("Progress: 0 files", true);
 
+  let unlisten: UnlistenFn | null = null;
   try {
+    unlisten = await listen<ScanProgress>("scan-progress", (event) => {
+      applyScanProgress(event.payload.files);
+    });
+
     const result = await scanRoot(path);
     const info = await getRootInfo(result.rootId);
     state.root = info;
@@ -586,6 +608,13 @@ async function runScan(path: string, scanMode: "select" | "rescan"): Promise<voi
       showEmpty("no_media");
     }
   } finally {
+    if (unlisten) {
+      try {
+        unlisten();
+      } catch {
+        /* ignore */
+      }
+    }
     state.scanning = false;
     refreshToolbarChrome();
   }

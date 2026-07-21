@@ -44,10 +44,23 @@ The window opens maximized on a black letterbox stage. On launch, SQLite opens u
 ## Build
 
 ```bash
-npm run tauri build
+npm run build:app
+# same as: npm run tauri build
 ```
 
-Artifacts are written under `src-tauri/target/release/` (and installers under `src-tauri/target/release/bundle/` when bundling is enabled).
+**Where things land (this is normal Tauri/Cargo behavior, not a misconfig):**
+
+| Output | Location |
+|--------|----------|
+| Compile cache + release binary | `src-tauri/target/release/media-browser.exe` |
+| Installers (MSI / NSIS) | `src-tauri/target/release/bundle/` |
+| **Portable run folder** (exe only; your `library.db` stays) | **`build/media-browser.exe`** |
+
+After the release binary is built, `beforeBundleCommand` runs `scripts/copy-portable.mjs`, which copies the exe into `build/` without touching `library.db`. To re-copy without a full rebuild:
+
+```bash
+npm run copy:portable
+```
 
 Frontend-only typecheck / build:
 
@@ -68,8 +81,10 @@ cargo check
 SQLite library database (portable — same folder as the executable):
 
 ```
-<folder-containing-the-exe>\library.db
+build\library.db
 ```
+
+(when you run `build\media-browser.exe`)
 
 In dev this is typically next to the debug binary under `src-tauri/target/debug/`. Copy or back up `library.db` alongside the `.exe` for portable use.
 

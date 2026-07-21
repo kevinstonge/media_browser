@@ -28,6 +28,10 @@ import {
   type MediaItem,
 } from "./api";
 import {
+  clearToolbarHideDelay,
+  notifyToolbarDropdownChanged,
+} from "./ui/chrome";
+import {
   commitHistoryBack as commitBackBag,
   commitHistoryForward as commitForwardBag,
   peekHistoryBack as peekBackBag,
@@ -521,6 +525,9 @@ function closeOpenPanels(): void {
   document.querySelectorAll("[aria-expanded='true']").forEach((el) => {
     el.setAttribute("aria-expanded", "false");
   });
+  // Dismiss without selection: drop post-pick hold and re-evaluate auto-hide.
+  clearToolbarHideDelay();
+  notifyToolbarDropdownChanged();
 }
 
 /** Wire left/right click navigation on the stage. */

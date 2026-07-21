@@ -14,6 +14,7 @@ import {
   type TagAsset,
 } from "../api";
 import { state } from "../state";
+import { notifyToolbarDropdownChanged } from "./chrome";
 import { closeToolbarMenus } from "./slideshow";
 import { openTagManager } from "./tagManager";
 
@@ -307,6 +308,7 @@ function toggleTagMenu(): void {
   renderTagMenu();
   tagMenu.hidden = false;
   tagBtn.setAttribute("aria-expanded", "true");
+  notifyToolbarDropdownChanged();
 }
 
 function appendManageTagsHeader(menu: HTMLElement): void {
@@ -320,7 +322,7 @@ function appendManageTagsHeader(menu: HTMLElement): void {
   `;
   manage.addEventListener("click", (e) => {
     e.stopPropagation();
-    closeToolbarMenus();
+    closeToolbarMenus({ afterSelection: true });
     openTagManager();
   });
   menu.appendChild(manage);

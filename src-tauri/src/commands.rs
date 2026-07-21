@@ -119,14 +119,19 @@ pub fn settings_set(
     set_setting(&conn, &key, &value)
 }
 
-/// Recursive scan / re-scan of a root folder into SQLite.
+/// Shallow scan / re-scan of a root folder into SQLite (first-level subdirs only).
+/// Emits throttled `scan-progress` events (`{ files }`) during the run.
 #[tauri::command]
-pub fn scan_root(state: State<'_, DbState>, path: String) -> Result<ScanResult, String> {
+pub fn scan_root(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    path: String,
+) -> Result<ScanResult, String> {
     let conn = state
         .0
         .lock()
         .map_err(|e| format!("db lock poisoned: {e}"))?;
-    scan::scan_root(&conn, &path)
+    scan::scan_root(&app, &conn, &path)
 }
 
 /// Basic media row by id.
