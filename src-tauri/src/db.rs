@@ -334,6 +334,26 @@ pub fn get_last_root(conn: &Connection) -> Result<Option<RootInfo>, String> {
     }
 }
 
+/// Look up a root by filesystem path (normalized the same way as scan).
+pub fn root_info_by_path(conn: &Connection, path: &str) -> Result<Option<RootInfo>, String> {
+    let root = crate::scan::normalize_root(path)?;
+    let root_str = crate::scan::normalize_path_str(&root);
+
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM root_dir WHERE path = ?1",
+            params![root_str],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("root_info_by_path: {e}"))?;
+
+    match id {
+        Some(id) => root_info(conn, id),
+        None => Ok(None),
+    }
+}
+
 // --- Tags -------------------------------------------------------------------
 
 fn load_assets_for_tag(conn: &Connection, tag_id: i64) -> Result<Vec<TagAsset>, String> {

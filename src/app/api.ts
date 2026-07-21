@@ -71,6 +71,11 @@ export async function getRootInfo(rootId: number): Promise<RootInfo | null> {
   return invoke<RootInfo | null>("get_root_info", { rootId });
 }
 
+/** Look up a previously registered root by path (Scan vs Re-scan label). */
+export async function getRootByPath(path: string): Promise<RootInfo | null> {
+  return invoke<RootInfo | null>("get_root_by_path", { path });
+}
+
 export async function settingsGet(key: string): Promise<string | null> {
   return invoke<string | null>("settings_get", { key });
 }

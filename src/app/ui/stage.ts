@@ -24,11 +24,11 @@ export type PresentResult = "ready" | "missing" | "aborted";
 const EMPTY_COPY: Record<Exclude<StageEmptyReason, null>, { title: string; body: string }> = {
   no_root: {
     title: "No folder selected",
-    body: "Open Settings (⚙) and choose a media folder, then Scan.",
+    body: "Use the root folder control (📁⚙) in the toolbar to choose a media folder, then Scan.",
   },
   no_media: {
     title: "No media found",
-    body: "This folder has no supported images or videos. Pick another folder or Re-scan.",
+    body: "This folder has no supported images or videos. Select another root folder or Re-scan.",
   },
   loading: {
     title: "Loading…",

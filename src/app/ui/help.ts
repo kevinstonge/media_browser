@@ -15,7 +15,8 @@ const HELP_ROWS: Array<{ keys: string; action: string }> = [
   { keys: "Esc", action: "Close help / exit fullscreen" },
   { keys: "Ctrl+Q", action: "Quit" },
   { keys: "?", action: "Toggle this help" },
-  { keys: "⚙", action: "Settings (hover top-right)" },
+  { keys: "📁⚙", action: "Root folder: select / re-scan (toolbar)" },
+  { keys: "🏷", action: "Tags / Manage tags (toolbar)" },
 ];
 
 export function mountHelp(root: HTMLElement): void {

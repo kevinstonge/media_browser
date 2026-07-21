@@ -1,6 +1,6 @@
 /**
- * Top-center toolbar: folder picker, file picker, prev/next, slideshow
- * controls, and global nav scope / order / duration selects.
+ * Top-center toolbar: root library control, folder/file pickers, prev/next,
+ * slideshow controls, and global nav scope / order / duration selects.
  *
  * Scope (All / Current) and order (Sequential / Random) apply to every
  * navigation input and to the slideshow timer. Slideshow only schedules
@@ -16,6 +16,7 @@
  * and reset the duration clock through the nav step listener.
  */
 
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getFirstMedia,
   getFirstMediaInDir,
@@ -52,6 +53,10 @@ import {
   type NavOrder,
   type NavScope,
 } from "../state";
+import {
+  openRescanRootFolderModal,
+  openSelectRootFolderModal,
+} from "./rootFolder";
 
 let setStatus: StatusFn = () => {};
 let timerId: number | null = null;
@@ -60,6 +65,8 @@ let stopBtn: HTMLButtonElement | null = null;
 let prevBtn: HTMLButtonElement | null = null;
 let nextBtn: HTMLButtonElement | null = null;
 let resetHistoryBtn: HTMLButtonElement | null = null;
+let rootBtn: HTMLButtonElement | null = null;
+let rootMenu: HTMLElement | null = null;
 let folderBtn: HTMLButtonElement | null = null;
 let folderMenu: HTMLElement | null = null;
 let fileBtn: HTMLButtonElement | null = null;
@@ -86,6 +93,23 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   chrome.className = "slideshow-chrome nav-exclude";
   chrome.innerHTML = `
     <div class="slideshow-bar" role="toolbar" aria-label="Library and navigation">
+      <div class="toolbar-menu-wrap" id="toolbar-root-wrap">
+        <button
+          type="button"
+          class="toolbar-icon-btn"
+          id="toolbar-root-btn"
+          title="Root library folder"
+          aria-label="Root library folder"
+          aria-haspopup="menu"
+          aria-expanded="false"
+        >
+          <span class="toolbar-root-icon" aria-hidden="true">
+            <span class="toolbar-root-folder">📁</span>
+            <span class="toolbar-root-gear">⚙</span>
+          </span>
+        </button>
+        <div class="toolbar-dropdown" id="toolbar-root-menu" role="menu" aria-label="Root folder actions" hidden></div>
+      </div>
       <div class="toolbar-menu-wrap" id="toolbar-folder-wrap">
         <button
           type="button"
@@ -157,6 +181,14 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
           ${DURATION_OPTIONS_HTML}
         </select>
       </label>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="toolbar-icon-btn"
+        id="toolbar-fullscreen-btn"
+        title="Toggle fullscreen (F11)"
+        aria-label="Toggle fullscreen"
+      >⛶</button>
     </div>
   `;
   root.appendChild(chrome);
@@ -167,6 +199,8 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   prevBtn = chrome.querySelector("#nav-prev");
   nextBtn = chrome.querySelector("#nav-next");
   resetHistoryBtn = chrome.querySelector("#nav-reset-history");
+  rootBtn = chrome.querySelector("#toolbar-root-btn");
+  rootMenu = chrome.querySelector("#toolbar-root-menu");
   folderBtn = chrome.querySelector("#toolbar-folder-btn");
   folderMenu = chrome.querySelector("#toolbar-folder-menu");
   fileBtn = chrome.querySelector("#toolbar-file-btn");
@@ -175,6 +209,7 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   scopeSelect = chrome.querySelector("#nav-scope-select");
   orderSelect = chrome.querySelector("#nav-order-select");
   durationSelect = chrome.querySelector("#nav-duration-select");
+  const fullscreenBtn = chrome.querySelector<HTMLButtonElement>("#toolbar-fullscreen-btn");
 
   playPauseBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -198,6 +233,10 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
     onResetViewHistory();
   });
 
+  rootBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleRootMenu();
+  });
   folderBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
     void toggleFolderMenu();
@@ -205,6 +244,10 @@ export function mountSlideshow(root: HTMLElement, statusFn: StatusFn): void {
   fileBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
     void toggleFileMenu();
+  });
+  fullscreenBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void toggleFullscreen();
   });
 
   scopeSelect?.addEventListener("change", () => {
@@ -300,17 +343,75 @@ function updateResetHistoryButton(): void {
   resetHistoryBtn.disabled = state.scanning || !canResetActiveHistory();
 }
 
+/**
+ * Close every toolbar dropdown (folder, file, tags, …) and reset aria-expanded.
+ * Exported so other chrome (e.g. tag menu) can collapse siblings before opening.
+ */
+export function closeToolbarMenus(): void {
+  if (!chromeEl) return;
+  chromeEl.querySelectorAll<HTMLElement>(".toolbar-dropdown").forEach((el) => {
+    el.hidden = true;
+  });
+  chromeEl.querySelectorAll("[aria-expanded='true']").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+  });
+}
+
 function closeMenus(): void {
-  if (folderMenu) folderMenu.hidden = true;
-  if (fileMenu) fileMenu.hidden = true;
-  folderBtn?.setAttribute("aria-expanded", "false");
-  fileBtn?.setAttribute("aria-expanded", "false");
+  closeToolbarMenus();
+}
+
+function toggleRootMenu(): void {
+  if (!rootMenu || !rootBtn) return;
+  const opening = rootMenu.hidden;
+  closeToolbarMenus();
+  if (!opening) return;
+  populateRootMenu();
+  rootMenu.hidden = false;
+  rootBtn.setAttribute("aria-expanded", "true");
+}
+
+function populateRootMenu(): void {
+  if (!rootMenu) return;
+  rootMenu.innerHTML = "";
+
+  const hasRootPath = Boolean(state.root?.path);
+  const scanning = state.scanning;
+
+  const selectBtn = document.createElement("button");
+  selectBtn.type = "button";
+  selectBtn.className = "toolbar-option";
+  selectBtn.setAttribute("role", "menuitem");
+  selectBtn.textContent = "Select root folder";
+  selectBtn.disabled = scanning;
+  selectBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeMenus();
+    openSelectRootFolderModal();
+  });
+  rootMenu.appendChild(selectBtn);
+
+  const rescanBtn = document.createElement("button");
+  rescanBtn.type = "button";
+  rescanBtn.className = "toolbar-option";
+  rescanBtn.setAttribute("role", "menuitem");
+  rescanBtn.textContent = "Re-scan root folder";
+  rescanBtn.disabled = scanning || !hasRootPath;
+  if (!hasRootPath) {
+    rescanBtn.title = "Select a root folder first";
+  }
+  rescanBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeMenus();
+    openRescanRootFolderModal();
+  });
+  rootMenu.appendChild(rescanBtn);
 }
 
 async function toggleFolderMenu(): Promise<void> {
   if (!folderMenu || !folderBtn) return;
   const opening = folderMenu.hidden;
-  closeMenus();
+  closeToolbarMenus();
   if (!opening) return;
   await populateFolderMenu();
   folderMenu.hidden = false;
@@ -320,7 +421,7 @@ async function toggleFolderMenu(): Promise<void> {
 async function toggleFileMenu(): Promise<void> {
   if (!fileMenu || !fileBtn) return;
   const opening = fileMenu.hidden;
-  closeMenus();
+  closeToolbarMenus();
   if (!opening) return;
   await populateFileMenu(true);
   fileMenu.hidden = false;
@@ -503,6 +604,14 @@ function updateFileLabel(): void {
   if (folderBtn) {
     folderBtn.disabled = state.root == null || state.root.id <= 0;
   }
+  // Root control stays available so the user can pick a library when empty.
+  if (rootBtn) {
+    rootBtn.disabled = state.scanning;
+    const path = state.root?.path;
+    rootBtn.title = path
+      ? `Root library folder\n${path}`
+      : "Root library folder";
+  }
   const canNav =
     state.root != null &&
     state.root.id > 0 &&
@@ -541,8 +650,6 @@ async function onScopeOrOrderChange(): Promise<void> {
   ) as NavOrder;
   const mode = composeNavMode(order, scope);
   await setNavMode(mode);
-  // Keep Settings panel select in sync when present.
-  syncSettingsNavSelects(mode);
   updateNavSelects();
   setStatus(
     `Nav: ${labelMode(mode)}`,
@@ -555,26 +662,9 @@ async function onDurationSelectChange(): Promise<void> {
   if (!durationSelect) return;
   const sec = Number(durationSelect.value);
   await setSlideshowDurationSec(sec);
-  // Settings panel
-  const settingsDuration = document.querySelector<HTMLSelectElement>(
-    "#settings-slideshow-duration",
-  );
-  if (settingsDuration) settingsDuration.value = String(state.slideshowDurationSec);
   onSlideshowSettingsChanged();
   setStatus(`Slideshow interval: ${state.slideshowDurationSec}s`, true);
   window.setTimeout(() => setStatus("", false), 2000);
-}
-
-function syncSettingsNavSelects(mode: NavMode): void {
-  const settingsNav = document.querySelector<HTMLSelectElement>(
-    "#settings-nav-mode",
-  );
-  if (settingsNav) settingsNav.value = mode;
-  // Legacy dual select if still present
-  const settingsSlide = document.querySelector<HTMLSelectElement>(
-    "#settings-slideshow-nav-mode",
-  );
-  if (settingsSlide) settingsSlide.value = mode;
 }
 
 function cancelTimer(): void {
@@ -766,6 +856,18 @@ function labelMode(mode: NavMode): string {
   const order = navModeOrder(mode) === "random" ? "random" : "sequential";
   const scope = navModeScope(mode) === "current" ? "current folder" : "all folders";
   return `${order} · ${scope}`;
+}
+
+async function toggleFullscreen(): Promise<void> {
+  try {
+    const win = getCurrentWindow();
+    const isFullscreen = await win.isFullscreen();
+    await win.setFullscreen(!isFullscreen);
+  } catch (err) {
+    console.warn("toggle fullscreen failed", err);
+    setStatus("Fullscreen toggle failed", true);
+    window.setTimeout(() => setStatus("", false), 2500);
+  }
 }
 
 function formatErr(err: unknown): string {

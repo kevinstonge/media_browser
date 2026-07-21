@@ -498,17 +498,29 @@ function isLeftClickNavBlocked(target: EventTarget | null): boolean {
   return false;
 }
 
-/** True when a chrome panel is open — outside click should close it, not navigate. */
+/** True when a modal/overlay is open — outside click should not also navigate. */
 function isAnyPanelOpen(): boolean {
-  const panel = document.querySelector("#settings-panel");
-  return Boolean(panel && !panel.hasAttribute("hidden"));
+  for (const sel of [
+    "#root-folder-modal",
+    "#tag-manager",
+    "#keyboard-help",
+  ]) {
+    const el = document.querySelector(sel);
+    if (el && !el.hasAttribute("hidden")) return true;
+  }
+  // Any open toolbar dropdown
+  if (document.querySelector(".toolbar-dropdown:not([hidden])")) return true;
+  return false;
 }
 
 function closeOpenPanels(): void {
-  const panel = document.querySelector("#settings-panel");
-  if (panel && !panel.hasAttribute("hidden")) {
-    panel.setAttribute("hidden", "");
-  }
+  // Toolbar menus only — modals manage their own dismiss (Esc / OK / backdrop).
+  document.querySelectorAll<HTMLElement>(".toolbar-dropdown").forEach((el) => {
+    el.hidden = true;
+  });
+  document.querySelectorAll("[aria-expanded='true']").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+  });
 }
 
 /** Wire left/right click navigation on the stage. */
@@ -518,7 +530,7 @@ export function wireNavClicks(stageEl: HTMLElement): void {
     if (isLeftClickNavBlocked(e.target)) return;
     // Ignore multi-click / modified
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-    // Outside click closes settings; don't also step prev.
+    // Outside click closes chrome menus; don't also step prev.
     if (isAnyPanelOpen()) return;
     e.preventDefault();
     void goPrev();

@@ -8,7 +8,7 @@ use crate::db::{
     get_random as db_random, get_setting, list_media_in_dir as db_list_media_in_dir,
     list_parent_dirs as db_list_parent_dirs, list_tags as db_list_tags,
     remove_media_tag as db_remove_media_tag, remove_tag_asset as db_remove_tag_asset, root_info,
-    set_setting, DbState, MediaItem, RootInfo, Tag, TagAsset,
+    root_info_by_path, set_setting, DbState, MediaItem, RootInfo, Tag, TagAsset,
 };
 use crate::scan::{self, ScanResult};
 use tauri::{AppHandle, State};
@@ -80,6 +80,19 @@ pub fn get_root_info(state: State<'_, DbState>, root_id: i64) -> Result<Option<R
         .lock()
         .map_err(|e| format!("db lock poisoned: {e}"))?;
     root_info(&conn, root_id)
+}
+
+/// Root info by filesystem path (for Scan vs Re-scan label in select modal).
+#[tauri::command]
+pub fn get_root_by_path(
+    state: State<'_, DbState>,
+    path: String,
+) -> Result<Option<RootInfo>, String> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|e| format!("db lock poisoned: {e}"))?;
+    root_info_by_path(&conn, &path)
 }
 
 /// Read a setting value (JSON-encoded string as stored).

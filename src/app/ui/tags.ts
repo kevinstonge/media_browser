@@ -1,11 +1,10 @@
 /**
- * Per-item tags panel (top-left below badge strip, hover-reveal),
+ * Per-item tag editor (toolbar button + checkbox dropdown),
  * top-left badges, and sequential tag-sound queue (no overlap; video audio continues).
  */
 
 import {
   addMediaTag,
-  createTag,
   getMedia,
   listTags,
   mediaUrl,
@@ -15,21 +14,19 @@ import {
   type TagAsset,
 } from "../api";
 import { state } from "../state";
+import { closeToolbarMenus } from "./slideshow";
+import { openTagManager } from "./tagManager";
 
 export type StatusFn = (message: string, visible?: boolean) => void;
 
 let setStatus: StatusFn = () => {};
-let listEl: HTMLElement | null = null;
-let selectEl: HTMLSelectElement | null = null;
-let addBtn: HTMLButtonElement | null = null;
-let createInput: HTMLInputElement | null = null;
-let createBtn: HTMLButtonElement | null = null;
+let tagBtn: HTMLButtonElement | null = null;
+let tagMenu: HTMLElement | null = null;
 let badgesEl: HTMLElement | null = null;
-let chromeEl: HTMLElement | null = null;
 
-/** Tags currently shown for the active media item (panel list). */
+/** Tags currently associated with the active media item. */
 let itemTags: Tag[] = [];
-/** Full vocabulary for add dropdown. */
+/** Full vocabulary for the checkbox list. */
 let allTags: Tag[] = [];
 
 /** Bumped when media changes so in-flight sound queues abort. */
@@ -38,14 +35,18 @@ let activeAudio: HTMLAudioElement | null = null;
 /** Completes the in-flight playOneSound Promise (explicit cancel). */
 let soundDone: (() => void) | null = null;
 
-/** Optional listener when global tag vocabulary changes (settings refresh). */
+/** Tag ids with an in-flight add/remove (avoid double-toggles). */
+const pendingTagIds = new Set<number>();
+
+/** Optional listener when global tag vocabulary changes (tag manager refresh). */
 let vocabularyListener: (() => void) | null = null;
 
 export function setTagVocabularyListener(fn: (() => void) | null): void {
   vocabularyListener = fn;
 }
 
-function notifyVocabularyChanged(): void {
+/** Notify tag manager (or other UI) that the global tag vocabulary changed. */
+export function notifyVocabularyChanged(): void {
   try {
     vocabularyListener?.();
   } catch (err) {
@@ -53,6 +54,11 @@ function notifyVocabularyChanged(): void {
   }
 }
 
+/**
+ * Mount badge strip on root and tag control into the top toolbar
+ * (immediately after the file-selection dropdown).
+ * Requires slideshow toolbar to be mounted first.
+ */
 export function mountTags(root: HTMLElement, statusFn?: StatusFn): void {
   if (statusFn) setStatus = statusFn;
 
@@ -63,65 +69,53 @@ export function mountTags(root: HTMLElement, statusFn?: StatusFn): void {
   badgesEl.hidden = true;
   root.appendChild(badgesEl);
 
-  // Top-left hover-reveal tags panel (below badge strip; free of video controls)
-  chromeEl = document.createElement("div");
-  chromeEl.className = "tags-chrome nav-exclude";
-  chromeEl.innerHTML = `
-    <div class="tags-panel" role="region" aria-label="Tags">
-      <div class="tags-panel-title">Tags</div>
-      <ul class="tags-list" id="tags-list"></ul>
-      <div class="tags-add-row">
-        <select class="tags-select" id="tags-select" aria-label="Add tag" disabled>
-          <option value="">Add tag…</option>
-        </select>
-        <button type="button" class="tags-btn" id="tags-add" disabled>Add</button>
-      </div>
-      <div class="tags-create-row">
-        <input
-          type="text"
-          class="tags-input"
-          id="tags-create-input"
-          placeholder="New tag name"
-          maxlength="64"
-          aria-label="Create new tag"
-        />
-        <button type="button" class="tags-btn" id="tags-create">Create</button>
-      </div>
-    </div>
+  const fileWrap = root.querySelector("#toolbar-file-wrap");
+  const toolbarBar = root.querySelector(".slideshow-bar");
+  if (!fileWrap || !toolbarBar) {
+    console.warn("mountTags: toolbar not found; tag button skipped");
+    void refreshVocabulary();
+    return;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "toolbar-menu-wrap";
+  wrap.id = "toolbar-tag-wrap";
+  wrap.innerHTML = `
+    <button
+      type="button"
+      class="toolbar-icon-btn"
+      id="toolbar-tag-btn"
+      title="Tags"
+      aria-label="Tags"
+      aria-haspopup="true"
+      aria-expanded="false"
+    >
+      <span class="toolbar-tag-icon" aria-hidden="true">🏷</span>
+    </button>
+    <div
+      class="toolbar-dropdown toolbar-dropdown-tags"
+      id="toolbar-tag-menu"
+      role="group"
+      aria-label="Tags for current file"
+      hidden
+    ></div>
   `;
-  root.appendChild(chromeEl);
+  // Insert immediately after the file-selection dropdown.
+  fileWrap.insertAdjacentElement("afterend", wrap);
 
-  listEl = chromeEl.querySelector("#tags-list");
-  selectEl = chromeEl.querySelector("#tags-select");
-  addBtn = chromeEl.querySelector("#tags-add");
-  createInput = chromeEl.querySelector("#tags-create-input");
-  createBtn = chromeEl.querySelector("#tags-create");
+  tagBtn = wrap.querySelector("#toolbar-tag-btn");
+  tagMenu = wrap.querySelector("#toolbar-tag-menu");
 
-  addBtn?.addEventListener("click", (e) => {
+  tagBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
-    void onAddSelected();
+    toggleTagMenu();
   });
 
-  selectEl?.addEventListener("change", () => {
-    if (addBtn) addBtn.disabled = !selectEl?.value || state.currentMediaId == null;
-  });
+  // Keep menu open while interacting with checkboxes; block stage nav.
+  tagMenu?.addEventListener("click", (e) => e.stopPropagation());
+  tagMenu?.addEventListener("mousedown", (e) => e.stopPropagation());
 
-  createBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void onCreateAndAdd();
-  });
-
-  createInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      void onCreateAndAdd();
-    }
-  });
-
-  // Block click-nav when interacting with panel
-  chromeEl.addEventListener("click", (e) => e.stopPropagation());
-  chromeEl.addEventListener("contextmenu", (e) => e.stopPropagation());
-
+  updateTagButton();
   void refreshVocabulary();
 }
 
@@ -133,12 +127,15 @@ export async function refreshVocabulary(): Promise<void> {
     console.warn("list_tags failed", err);
     allTags = [];
   }
-  renderAddDropdown();
+  if (tagMenu && !tagMenu.hidden) {
+    renderTagMenu();
+  }
+  updateTagButton();
 }
 
 /**
  * Stop tag-sound queue and clear badge strip only.
- * Leaves the per-item tag editor panel intact (load errors, soft-missing).
+ * Leaves the tag editor control intact (load errors, soft-missing).
  */
 export function clearTagPresentation(): void {
   stopTagSounds();
@@ -147,7 +144,7 @@ export function clearTagPresentation(): void {
 
 /**
  * Called whenever the displayed media changes (or fully clears).
- * Stops sound queue, clears badges, loads item tags into the panel.
+ * Stops sound queue, clears badges, loads item tags into the editor.
  *
  * Soft-missing items still show/edit tags (associations live in DB).
  * Badge images + sounds only play when the file is not missing.
@@ -155,17 +152,18 @@ export function clearTagPresentation(): void {
 export function onMediaDisplayed(item: MediaItem | null): void {
   stopTagSounds();
   clearBadges();
+  pendingTagIds.clear();
 
   if (!item) {
     itemTags = [];
-    renderTagList();
-    renderAddDropdown();
+    updateTagButton();
+    if (tagMenu && !tagMenu.hidden) renderTagMenu();
     return;
   }
 
   itemTags = item.tags ? [...item.tags] : [];
-  renderTagList();
-  renderAddDropdown();
+  updateTagButton();
+  if (tagMenu && !tagMenu.hidden) renderTagMenu();
   if (!item.isMissing) {
     showBadgesAndPlaySounds(itemTags);
   }
@@ -288,73 +286,102 @@ function playOneSound(path: string, gen: number): Promise<void> {
   });
 }
 
-function renderTagList(): void {
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (state.currentMediaId == null) {
-    const li = document.createElement("li");
-    li.className = "tags-empty";
-    li.textContent = "No media";
-    listEl.appendChild(li);
-    return;
-  }
-
-  if (itemTags.length === 0) {
-    const li = document.createElement("li");
-    li.className = "tags-empty";
-    li.textContent = "No tags";
-    listEl.appendChild(li);
-    return;
-  }
-
-  for (const tag of itemTags) {
-    const li = document.createElement("li");
-    li.className = "tags-item";
-    li.dataset.tagId = String(tag.id);
-
-    const name = document.createElement("span");
-    name.className = "tags-item-name";
-    name.textContent = tag.name;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "tags-item-remove";
-    remove.title = `Remove “${tag.name}”`;
-    remove.setAttribute("aria-label", `Remove tag ${tag.name}`);
-    remove.textContent = "×";
-    remove.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void onRemoveTag(tag.id);
-    });
-
-    li.appendChild(name);
-    li.appendChild(remove);
-    listEl.appendChild(li);
-  }
+function updateTagButton(): void {
+  if (!tagBtn) return;
+  // Always enabled so Manage tags stays reachable without a selected file.
+  const hasMedia = state.currentMediaId != null;
+  const n = itemTags.length;
+  const label = n > 0 ? `Tags (${n})` : "Tags";
+  tagBtn.title = hasMedia ? label : "Tags (manage or select a file)";
+  tagBtn.setAttribute("aria-label", label);
+  tagBtn.classList.toggle("toolbar-tag-btn-active", n > 0);
 }
 
-function renderAddDropdown(): void {
-  if (!selectEl || !addBtn) return;
-  const onItem = new Set(itemTags.map((t) => t.id));
-  const available = allTags.filter((t) => !onItem.has(t.id));
+function toggleTagMenu(): void {
+  if (!tagMenu || !tagBtn) return;
 
-  selectEl.innerHTML = "";
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = available.length ? "Add tag…" : "No more tags";
-  selectEl.appendChild(placeholder);
+  const opening = tagMenu.hidden;
+  closeToolbarMenus();
+  if (!opening) return;
 
-  for (const tag of available) {
-    const opt = document.createElement("option");
-    opt.value = String(tag.id);
-    opt.textContent = tag.name;
-    selectEl.appendChild(opt);
+  renderTagMenu();
+  tagMenu.hidden = false;
+  tagBtn.setAttribute("aria-expanded", "true");
+}
+
+function appendManageTagsHeader(menu: HTMLElement): void {
+  const manage = document.createElement("button");
+  manage.type = "button";
+  manage.className = "toolbar-tag-manage";
+  manage.setAttribute("aria-label", "Manage tags");
+  manage.innerHTML = `
+    <span class="toolbar-tag-manage-icon" aria-hidden="true">⚙</span>
+    <span class="toolbar-tag-manage-label">Manage tags</span>
+  `;
+  manage.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeToolbarMenus();
+    openTagManager();
+  });
+  menu.appendChild(manage);
+
+  const divider = document.createElement("div");
+  divider.className = "toolbar-tag-menu-divider";
+  divider.setAttribute("role", "separator");
+  menu.appendChild(divider);
+}
+
+function renderTagMenu(): void {
+  if (!tagMenu) return;
+  tagMenu.innerHTML = "";
+
+  appendManageTagsHeader(tagMenu);
+
+  if (state.currentMediaId == null) {
+    const empty = document.createElement("div");
+    empty.className = "toolbar-option toolbar-option-empty";
+    empty.textContent = "Select a file to assign tags";
+    tagMenu.appendChild(empty);
+    return;
   }
 
-  const canAdd = state.currentMediaId != null && available.length > 0;
-  selectEl.disabled = !canAdd;
-  addBtn.disabled = true;
+  if (allTags.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "toolbar-option toolbar-option-empty";
+    empty.textContent = "No tags yet";
+    tagMenu.appendChild(empty);
+    const hint = document.createElement("div");
+    hint.className = "toolbar-tag-hint";
+    hint.textContent = "Use Manage tags to create some";
+    tagMenu.appendChild(hint);
+    return;
+  }
+
+  const onItem = new Set(itemTags.map((t) => t.id));
+
+  for (const tag of allTags) {
+    const row = document.createElement("label");
+    row.className = "toolbar-tag-option";
+    row.title = tag.name;
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "toolbar-tag-checkbox";
+    cb.checked = onItem.has(tag.id);
+    cb.disabled = pendingTagIds.has(tag.id);
+    cb.setAttribute("aria-label", tag.name);
+    cb.addEventListener("change", () => {
+      void onToggleTag(tag.id, cb.checked, cb);
+    });
+
+    const name = document.createElement("span");
+    name.className = "toolbar-tag-option-name";
+    name.textContent = tag.name;
+
+    row.appendChild(cb);
+    row.appendChild(name);
+    tagMenu.appendChild(row);
+  }
 }
 
 /** True when UI mutations still target the media we started the mutation for. */
@@ -365,8 +392,8 @@ function stillOnMedia(mediaId: number): boolean {
 function applyItemTagsLocally(tags: Tag[]): void {
   itemTags = tags;
   if (state.currentMedia) state.currentMedia.tags = [...itemTags];
-  renderTagList();
-  renderAddDropdown();
+  updateTagButton();
+  if (tagMenu && !tagMenu.hidden) renderTagMenu();
   stopTagSounds();
   clearBadges();
   if (!state.currentMedia?.isMissing) {
@@ -374,89 +401,58 @@ function applyItemTagsLocally(tags: Tag[]): void {
   }
 }
 
-async function onAddSelected(): Promise<void> {
+async function onToggleTag(
+  tagId: number,
+  wantOn: boolean,
+  checkbox: HTMLInputElement,
+): Promise<void> {
   const mediaId = state.currentMediaId;
-  const tagId = Number(selectEl?.value);
-  if (mediaId == null || !Number.isFinite(tagId) || tagId <= 0) return;
-
-  try {
-    const tag = await addMediaTag(mediaId, tagId);
-    // ISSUE-1: user may have navigated away during the await.
-    if (!stillOnMedia(mediaId)) return;
-
-    const next = itemTags.some((t) => t.id === tag.id)
-      ? itemTags
-      : [...itemTags, tag].sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-        );
-    applyItemTagsLocally(next);
-  } catch (err) {
-    setStatus(`Add tag failed: ${formatErr(err)}`, true);
+  if (mediaId == null) {
+    checkbox.checked = false;
+    return;
   }
-}
-
-async function onRemoveTag(tagId: number): Promise<void> {
-  const mediaId = state.currentMediaId;
-  if (mediaId == null) return;
-
-  try {
-    await removeMediaTag(mediaId, tagId);
-    if (!stillOnMedia(mediaId)) return;
-
-    applyItemTagsLocally(itemTags.filter((t) => t.id !== tagId));
-  } catch (err) {
-    setStatus(`Remove tag failed: ${formatErr(err)}`, true);
+  if (pendingTagIds.has(tagId)) {
+    checkbox.checked = !wantOn;
+    return;
   }
-}
 
-async function onCreateAndAdd(): Promise<void> {
-  const name = createInput?.value.trim() ?? "";
-  if (!name) return;
+  const currentlyOn = itemTags.some((t) => t.id === tagId);
+  if (wantOn === currentlyOn) return;
 
-  // Capture before any await so attach targets the item the user acted on.
-  const mediaId = state.currentMediaId;
+  pendingTagIds.add(tagId);
+  checkbox.disabled = true;
 
   try {
-    const tag = await createTag(name);
-    // Vocabulary always updates (global), even if media changed mid-flight.
-    if (!allTags.some((t) => t.id === tag.id)) {
-      allTags.push(tag);
-      allTags.sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    if (wantOn) {
+      const tag = await addMediaTag(mediaId, tagId);
+      if (!stillOnMedia(mediaId)) return;
+
+      const next = itemTags.some((t) => t.id === tag.id)
+        ? itemTags
+        : [...itemTags, tag].sort((a, b) =>
+            a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+          );
+      applyItemTagsLocally(next);
+    } else {
+      await removeMediaTag(mediaId, tagId);
+      if (!stillOnMedia(mediaId)) return;
+      applyItemTagsLocally(itemTags.filter((t) => t.id !== tagId));
+    }
+  } catch (err) {
+    // Revert checkbox if we are still on the same item.
+    if (stillOnMedia(mediaId)) {
+      checkbox.checked = currentlyOn;
+      setStatus(
+        `${wantOn ? "Add" : "Remove"} tag failed: ${formatErr(err)}`,
+        true,
       );
-    } else {
-      allTags = allTags.map((t) => (t.id === tag.id ? tag : t));
     }
-    notifyVocabularyChanged();
-
-    if (createInput) createInput.value = "";
-
-    if (mediaId != null && stillOnMedia(mediaId)) {
-      if (!itemTags.some((t) => t.id === tag.id)) {
-        const attached = await addMediaTag(mediaId, tag.id);
-        if (!stillOnMedia(mediaId)) {
-          renderAddDropdown();
-          setStatus(`Tag “${tag.name}” ready`, true);
-          window.setTimeout(() => setStatus("", false), 2000);
-          return;
-        }
-        const next = [...itemTags, attached].sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-        );
-        applyItemTagsLocally(next);
-      } else {
-        renderTagList();
-        renderAddDropdown();
-      }
-    } else {
-      // No media, or navigated away: just refresh dropdown from new vocab.
-      renderAddDropdown();
+  } finally {
+    pendingTagIds.delete(tagId);
+    if (stillOnMedia(mediaId) && tagMenu && !tagMenu.hidden) {
+      // Re-render so disabled state and checks stay in sync.
+      renderTagMenu();
     }
-
-    setStatus(`Tag “${tag.name}” ready`, true);
-    window.setTimeout(() => setStatus("", false), 2000);
-  } catch (err) {
-    setStatus(`Create tag failed: ${formatErr(err)}`, true);
   }
 }
 

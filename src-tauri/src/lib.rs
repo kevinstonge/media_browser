@@ -24,6 +24,7 @@ pub fn run() {
             commands::pick_file,
             commands::get_last_root,
             commands::get_root_info,
+            commands::get_root_by_path,
             commands::settings_get,
             commands::settings_set,
             commands::scan_root,

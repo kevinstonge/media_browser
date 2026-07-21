@@ -4,9 +4,17 @@ import { handleNavKey, initNav, wireNavClicks, wireNavWheel } from "./app/nav";
 import { mountChrome } from "./app/ui/chrome";
 import { handleHelpKey, mountHelp } from "./app/ui/help";
 import { initOpenWith } from "./app/ui/openWith";
+import {
+  handleRootFolderKey,
+  mountRootFolder,
+} from "./app/ui/rootFolder";
 import { mountSettings } from "./app/ui/settings";
 import { mountSlideshow, toggleSlideshowPlayback } from "./app/ui/slideshow";
 import { mountStage } from "./app/ui/stage";
+import {
+  handleTagManagerKey,
+  mountTagManager,
+} from "./app/ui/tagManager";
 import { mountTags } from "./app/ui/tags";
 
 const appWindow = getCurrentWindow();
@@ -60,7 +68,9 @@ function wireKeyboard(): void {
       return;
     }
 
-    // Help overlay: `?` toggle; Esc closes help before leaving fullscreen.
+    // Modals / help consume Esc before leaving fullscreen.
+    if (handleTagManagerKey(e)) return;
+    if (handleRootFolderKey(e)) return;
     if (handleHelpKey(e)) return;
 
     if (e.key === "F11") {
@@ -108,9 +118,12 @@ async function init(): Promise<void> {
     wireNavWheel(stageRoot);
   }
   if (appRoot) {
-    mountTags(appRoot, setStatus);
-    mountSettings(appRoot, setStatus);
+    // Slideshow toolbar first so the tag button can mount beside the file picker.
     mountSlideshow(appRoot, setStatus);
+    mountTags(appRoot, setStatus);
+    mountTagManager(appRoot, setStatus);
+    mountRootFolder(appRoot, setStatus);
+    mountSettings(appRoot, setStatus);
     mountHelp(appRoot);
     mountChrome(appRoot);
   }
