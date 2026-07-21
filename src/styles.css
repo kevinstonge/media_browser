@@ -49,12 +49,14 @@ body {
   justify-content: center;
 }
 
+/* Scale up or down to best-fit the stage; preserve aspect ratio (letterbox). */
 .stage-media {
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
-  width: auto;
-  height: auto;
   object-fit: contain;
+  object-position: center;
   background: #000;
   user-select: none;
   -webkit-user-drag: none;
@@ -191,7 +193,7 @@ body {
   opacity: 1;
 }
 
-/* ---- Settings chrome (hover-reveal gear) ---- */
+/* ---- Settings chrome (hover-reveal corner stack: fullscreen + gear) ---- */
 
 .settings-chrome {
   position: absolute;
@@ -200,12 +202,20 @@ body {
   z-index: 30;
   /* padded hit region ~10px — larger than the visible control */
   padding: 10px;
-  /* Expand hover capture slightly past padding for easier discovery */
+  /* Two stacked 40px buttons + gap */
   min-width: 56px;
-  min-height: 56px;
+  min-height: 100px;
   pointer-events: auto;
 }
 
+.chrome-corner-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-corner-btn,
 .settings-gear {
   width: 40px;
   height: 40px;
@@ -215,17 +225,18 @@ body {
   color: #666;
   font-size: 1.35rem;
   cursor: pointer;
-  opacity: 0.25;
+  /* Fully hidden until hover / focus / open panel */
+  opacity: 0;
   transition: opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.settings-chrome:hover .settings-gear,
-.settings-gear:focus-visible,
-.settings-chrome:focus-within .settings-gear,
-.settings-chrome:has(#settings-panel:not([hidden])) .settings-gear {
+.settings-chrome:hover .settings-corner-btn,
+.settings-corner-btn:focus-visible,
+.settings-chrome:focus-within .settings-corner-btn,
+.settings-chrome:has(#settings-panel:not([hidden])) .settings-corner-btn {
   opacity: 1;
   color: #eee;
   background: rgba(30, 30, 30, 0.75);
@@ -368,16 +379,18 @@ body {
   cursor: default;
 }
 
-/* ---- Slideshow chrome (hover-reveal, bottom-right) ---- */
+/* ---- Top-center toolbar (folder / file / slideshow, hover-reveal) ---- */
 
 .slideshow-chrome {
   position: absolute;
-  bottom: 0;
-  right: 0;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 30;
   /* padded hit region ~10px */
   padding: 10px;
-  min-width: 120px;
+  max-width: min(96vw, 980px);
+  min-width: 200px;
   min-height: 48px;
   pointer-events: auto;
 }
@@ -389,28 +402,184 @@ body {
   padding: 6px 8px;
   border-radius: 8px;
   background: transparent;
-  opacity: 0.25;
-  transition: opacity 0.2s ease, background 0.2s ease;
+  border: 1px solid transparent;
+  /* Fully hidden until hover / focus */
+  opacity: 0;
+  transition: opacity 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+  flex-wrap: nowrap;
+  max-width: 100%;
 }
 
 .slideshow-chrome:hover .slideshow-bar,
 .slideshow-chrome:focus-within .slideshow-bar {
   opacity: 1;
   background: rgba(22, 22, 24, 0.92);
-  border: 1px solid #333;
+  border-color: #333;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
 
-.slideshow-status {
-  font-size: 0.72rem;
-  color: #9ab;
+/* Keep bar visible while a dropdown is open (focus may move into menu) */
+.slideshow-chrome:has(.toolbar-dropdown:not([hidden])) .slideshow-bar {
+  opacity: 1;
+  background: rgba(22, 22, 24, 0.92);
+  border-color: #333;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.toolbar-menu-wrap {
+  position: relative;
+  flex-shrink: 1;
   min-width: 0;
-  padding: 0 4px;
+}
+
+/* File selector stays a constant width so the toolbar doesn't jump with names. */
+#toolbar-file-wrap {
+  flex: 0 0 180px;
+  width: 180px;
+  min-width: 180px;
+}
+
+.toolbar-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  border: 1px solid #444;
+  background: #2a2a2e;
+  color: #eee;
+  border-radius: 6px;
+  padding: 0;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.toolbar-icon-btn:hover:not(:disabled) {
+  background: #3a3a40;
+  border-color: #666;
+}
+
+.toolbar-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.toolbar-folder-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.toolbar-file-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 180px;
+  max-width: 180px;
+  min-width: 180px;
+  height: 30px;
+  border: 1px solid #444;
+  background: #2a2a2e;
+  color: #eee;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.toolbar-file-btn:hover:not(:disabled) {
+  background: #3a3a40;
+  border-color: #666;
+}
+
+.toolbar-file-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.toolbar-file-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.toolbar-caret {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  color: #9ab;
+  opacity: 0.9;
+}
+
+.toolbar-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 160px;
+  max-width: min(360px, 70vw);
+  max-height: min(50vh, 320px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(22, 22, 24, 0.97);
+  border: 1px solid #444;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.toolbar-dropdown-files {
+  min-width: 180px;
+  max-width: min(400px, 75vw);
+  max-height: min(55vh, 360px);
+}
+
+.toolbar-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: #e4e4e4;
+  font-size: 0.78rem;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.slideshow-status:empty {
-  display: none;
+.toolbar-option:hover {
+  background: #33333a;
+}
+
+.toolbar-option-active {
+  background: rgba(90, 138, 208, 0.22);
+  color: #dce8f8;
+}
+
+.toolbar-option-active:hover {
+  background: rgba(90, 138, 208, 0.32);
+}
+
+.toolbar-option-empty {
+  color: #666;
+  font-style: italic;
+  cursor: default;
+  pointer-events: none;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: #444;
+  margin: 0 2px;
+  flex-shrink: 0;
 }
 
 .slideshow-btn {
@@ -422,6 +591,7 @@ body {
   font-size: 0.78rem;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
 }
 
 .slideshow-btn:hover:not(:disabled) {
@@ -434,8 +604,55 @@ body {
   cursor: not-allowed;
 }
 
-.slideshow-btn[hidden] {
-  display: none;
+.slideshow-scope {
+  display: flex;
+  align-items: center;
+  margin-left: 2px;
+  flex-shrink: 0;
+}
+
+.slideshow-scope-select {
+  box-sizing: border-box;
+  height: 30px;
+  min-width: 5.5em;
+  border: 1px solid #444;
+  background: #2a2a2e;
+  color: #eee;
+  border-radius: 6px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.slideshow-duration-select {
+  min-width: 4.25em;
+}
+
+.slideshow-scope-select:hover {
+  background: #3a3a40;
+  border-color: #666;
+}
+
+.slideshow-scope-select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(90, 138, 208, 0.45);
+}
+
+/* Prev / next / reset / slideshow transport: fixed icon size (no toolbar resize) */
+#nav-prev,
+#nav-next,
+#nav-reset-history,
+.slideshow-icon-btn {
+  min-width: 2rem;
+  width: 2rem;
+  padding: 6px 0;
+  text-align: center;
+  line-height: 1;
+}
+
+#nav-reset-history {
+  font-size: 1rem;
 }
 
 .settings-input {
@@ -603,11 +820,12 @@ body {
   outline: 1px dashed #666;
 }
 
-/* ---- Tags panel (bottom-left, hover-reveal) ---- */
+/* ---- Tags panel (top-left below badges, hover-reveal) ---- */
 
 .tags-chrome {
   position: absolute;
-  bottom: 0;
+  /* Leave room for tag badge image row above (badges ~56px + gap + inset) */
+  top: 76px;
   left: 0;
   z-index: 30;
   padding: 10px;
@@ -621,7 +839,8 @@ body {
   padding: 10px 12px 12px;
   border-radius: 8px;
   background: transparent;
-  opacity: 0.25;
+  /* Fully hidden until hover / focus */
+  opacity: 0;
   transition: opacity 0.2s ease, background 0.2s ease, border-color 0.2s ease;
   border: 1px solid transparent;
   pointer-events: auto;
@@ -767,8 +986,12 @@ body {
 /* Focus outlines on chrome controls (optional polish) */
 .settings-btn:focus-visible,
 .slideshow-btn:focus-visible,
+.toolbar-icon-btn:focus-visible,
+.toolbar-file-btn:focus-visible,
+.toolbar-option:focus-visible,
 .tags-btn:focus-visible,
 .tags-item-remove:focus-visible,
+.settings-corner-btn:focus-visible,
 .settings-gear:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(90, 138, 208, 0.45);

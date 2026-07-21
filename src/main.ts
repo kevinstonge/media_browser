@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dbHealth } from "./app/api";
-import { handleNavKey, initNav, wireNavClicks } from "./app/nav";
+import { handleNavKey, initNav, wireNavClicks, wireNavWheel } from "./app/nav";
 import { mountChrome } from "./app/ui/chrome";
 import { handleHelpKey, mountHelp } from "./app/ui/help";
 import { initOpenWith } from "./app/ui/openWith";
@@ -105,6 +105,7 @@ async function init(): Promise<void> {
   if (stageRoot) {
     mountStage(stageRoot);
     wireNavClicks(stageRoot);
+    wireNavWheel(stageRoot);
   }
   if (appRoot) {
     mountTags(appRoot, setStatus);

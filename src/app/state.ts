@@ -1,5 +1,8 @@
 /**
  * Application session state: current media, nav mode, browse + slideshow history.
+ *
+ * Nav mode is a single global setting (order × scope) used by all inputs and by
+ * the slideshow timer — slideshow only auto-sends "next" on an interval.
  */
 
 import type { MediaItem, RootInfo } from "./api";
@@ -17,7 +20,15 @@ import {
   type HistoryBag,
 } from "./history";
 
-export type NavMode = "alpha" | "random_root" | "random_current_dir";
+/** Sequential/random × all-folders/current-folder. */
+export type NavMode =
+  | "alpha"
+  | "alpha_current_dir"
+  | "random_root"
+  | "random_current_dir";
+
+export type NavOrder = "sequential" | "random";
+export type NavScope = "all" | "current";
 
 export type StageEmptyReason =
   | "no_root"
@@ -31,14 +42,25 @@ export type SlideshowStatus = "idle" | "playing" | "paused";
 
 export const DEFAULT_SLIDESHOW_DURATION_SEC = 5;
 
+/** Allowed slideshow interval choices (seconds). */
+export const SLIDESHOW_DURATION_OPTIONS = [
+  5, 10, 15, 30, 60, 120, 300,
+] as const;
+
+export type SlideshowDurationSec = (typeof SLIDESHOW_DURATION_OPTIONS)[number];
+
 export interface AppState {
   currentMediaId: number | null;
   currentMedia: MediaItem | null;
   root: RootInfo | null;
+  /**
+   * Single navigation mode for browse + slideshow.
+   * (slideshowNavMode is kept in sync for legacy settings keys.)
+   */
   navMode: NavMode;
-  /** Separate nav mode used only while slideshow is active. */
+  /** @deprecated Prefer navMode; kept equal to navMode for load migration. */
   slideshowNavMode: NavMode;
-  /** Integer seconds between auto-advances (settings-backed). */
+  /** Integer seconds between auto-advances (settings-backed; discrete options). */
   slideshowDurationSec: number;
   slideshowStatus: SlideshowStatus;
   scanning: boolean;
@@ -132,11 +154,12 @@ export function activeHistoryBag(): HistoryBag {
     : browseHistoryBag();
 }
 
-/** Nav mode currently used by next/prev. */
+/**
+ * Nav mode for next/prev — always the global setting.
+ * Slideshow only auto-fires goNext; it does not use a separate mode.
+ */
 export function activeNavMode(): NavMode {
-  return state.slideshowStatus !== "idle"
-    ? state.slideshowNavMode
-    : state.navMode;
+  return state.navMode;
 }
 
 export function isSlideshowActive(): boolean {
@@ -208,6 +231,35 @@ export function clearSlideshowHistory(): void {
 }
 
 /**
+ * True when the active nav bag (browse or slideshow) has more than the
+ * current tip — i.e. Prev/Next would walk stored history.
+ */
+export function canResetActiveHistory(): boolean {
+  if (state.currentMediaId == null) return false;
+  return activeHistoryBag().history.length > 1;
+}
+
+/**
+ * Collapse active view history to `[currentId]` so the next Prev/Next
+ * extends a fresh path (new random pick, or sequential neighbor from here).
+ * Keeps the displayed media. Returns true if the bag was changed.
+ */
+export function resetActiveHistoryToCurrent(): boolean {
+  const id = state.currentMediaId;
+  if (id == null) return false;
+  const bag = activeHistoryBag();
+  if (
+    bag.history.length === 1 &&
+    bag.historyCursor === 0 &&
+    bag.history[0] === id
+  ) {
+    return false;
+  }
+  resetHistoryBag(bag, id);
+  return true;
+}
+
+/**
  * After leaving slideshow, ensure browse history tip matches the displayed item
  * so Prev/Next from Stop continue from current (without wiping the stack).
  * Prefers push-if-not-at-cursor over resetHistory.
@@ -225,11 +277,49 @@ export function reconcileBrowseHistoryWithCurrent(): void {
 export function isNavMode(value: unknown): value is NavMode {
   return (
     value === "alpha" ||
+    value === "alpha_current_dir" ||
     value === "random_root" ||
     value === "random_current_dir"
   );
 }
 
+export function isNavOrder(value: unknown): value is NavOrder {
+  return value === "sequential" || value === "random";
+}
+
+export function isNavScope(value: unknown): value is NavScope {
+  return value === "all" || value === "current";
+}
+
+/** Compose order × scope into the stored NavMode. */
+export function composeNavMode(order: NavOrder, scope: NavScope): NavMode {
+  if (order === "random") {
+    return scope === "current" ? "random_current_dir" : "random_root";
+  }
+  return scope === "current" ? "alpha_current_dir" : "alpha";
+}
+
+export function navModeOrder(mode: NavMode): NavOrder {
+  return mode === "random_root" || mode === "random_current_dir"
+    ? "random"
+    : "sequential";
+}
+
+export function navModeScope(mode: NavMode): NavScope {
+  return mode === "alpha_current_dir" || mode === "random_current_dir"
+    ? "current"
+    : "all";
+}
+
+/** True for alphabetical / sequential modes (SQL neighbor, not random pick). */
+export function isSequentialMode(mode: NavMode): boolean {
+  return mode === "alpha" || mode === "alpha_current_dir";
+}
+
+/**
+ * Snap duration to nearest allowed option (or default).
+ * Accepts legacy free-form values by rounding to closest preset.
+ */
 export function clampSlideshowDurationSec(value: unknown): number {
   const n =
     typeof value === "number"
@@ -239,7 +329,16 @@ export function clampSlideshowDurationSec(value: unknown): number {
         : NaN;
   if (!Number.isFinite(n)) return DEFAULT_SLIDESHOW_DURATION_SEC;
   const i = Math.floor(n);
-  if (i < 1) return 1;
-  if (i > 3600) return 3600;
-  return i;
+  if (i < 1) return SLIDESHOW_DURATION_OPTIONS[0];
+
+  let best: number = SLIDESHOW_DURATION_OPTIONS[0];
+  let bestDist = Math.abs(i - best);
+  for (const opt of SLIDESHOW_DURATION_OPTIONS) {
+    const d = Math.abs(i - opt);
+    if (d < bestDist) {
+      best = opt;
+      bestDist = d;
+    }
+  }
+  return best;
 }

@@ -1,5 +1,5 @@
 /**
- * Unit tests for dual-history switching, stop reconcile, duration clamp.
+ * Unit tests for dual-history switching, stop reconcile, duration clamp, nav compose.
  * Run: npm run test:unit
  */
 
@@ -10,17 +10,24 @@ import {
   activeNavMode,
   browseHistoryBag,
   bumpNavSessionGeneration,
+  canResetActiveHistory,
   clampSlideshowDurationSec,
   clearHistory,
   clearSlideshowHistory,
+  composeNavMode,
   DEFAULT_SLIDESHOW_DURATION_SEC,
   isNavSessionStale,
+  isSequentialMode,
   isSlideshowActive,
+  navModeOrder,
+  navModeScope,
   pushHistory,
   reconcileBrowseHistoryWithCurrent,
+  resetActiveHistoryToCurrent,
   resetHistory,
   resetSlideshowHistory,
   slideshowHistoryBag,
+  SLIDESHOW_DURATION_OPTIONS,
   state,
 } from "./state.ts";
 
@@ -42,7 +49,7 @@ function resetSession(): void {
 describe("activeHistoryBag / activeNavMode", () => {
   beforeEach(resetSession);
 
-  it("uses browse bag + navMode when slideshow idle", () => {
+  it("uses browse bag + global navMode when slideshow idle", () => {
     state.slideshowStatus = "idle";
     state.navMode = "alpha";
     state.slideshowNavMode = "random_root";
@@ -51,19 +58,20 @@ describe("activeHistoryBag / activeNavMode", () => {
     assert.equal(isSlideshowActive(), false);
   });
 
-  it("uses slideshow bag + slideshowNavMode when playing", () => {
+  it("uses slideshow bag but still global navMode when playing", () => {
     state.slideshowStatus = "playing";
     state.navMode = "alpha";
     state.slideshowNavMode = "random_current_dir";
     assert.equal(activeHistoryBag(), slideshowHistoryBag());
-    assert.equal(activeNavMode(), "random_current_dir");
+    // Mode is global — slideshow does not override.
+    assert.equal(activeNavMode(), "alpha");
     assert.equal(isSlideshowActive(), true);
   });
 
   it("uses slideshow bag while paused (still active)", () => {
     state.slideshowStatus = "paused";
-    state.navMode = "alpha";
-    state.slideshowNavMode = "random_root";
+    state.navMode = "random_root";
+    state.slideshowNavMode = "alpha";
     assert.equal(activeHistoryBag(), slideshowHistoryBag());
     assert.equal(activeNavMode(), "random_root");
     assert.equal(isSlideshowActive(), true);
@@ -89,6 +97,80 @@ describe("activeHistoryBag / activeNavMode", () => {
     assert.equal(state.historyCursor, 2);
     assert.deepEqual(state.slideshowHistory, []);
     assert.equal(state.slideshowHistoryCursor, -1);
+  });
+});
+
+describe("composeNavMode / order / scope", () => {
+  it("maps all four combinations", () => {
+    assert.equal(composeNavMode("sequential", "all"), "alpha");
+    assert.equal(composeNavMode("sequential", "current"), "alpha_current_dir");
+    assert.equal(composeNavMode("random", "all"), "random_root");
+    assert.equal(composeNavMode("random", "current"), "random_current_dir");
+  });
+
+  it("round-trips order and scope", () => {
+    for (const mode of [
+      "alpha",
+      "alpha_current_dir",
+      "random_root",
+      "random_current_dir",
+    ] as const) {
+      assert.equal(
+        composeNavMode(navModeOrder(mode), navModeScope(mode)),
+        mode,
+      );
+    }
+  });
+
+  it("isSequentialMode distinguishes order axis", () => {
+    assert.equal(isSequentialMode("alpha"), true);
+    assert.equal(isSequentialMode("alpha_current_dir"), true);
+    assert.equal(isSequentialMode("random_root"), false);
+    assert.equal(isSequentialMode("random_current_dir"), false);
+  });
+});
+
+describe("resetActiveHistoryToCurrent", () => {
+  beforeEach(resetSession);
+
+  it("is disabled with no current media or single-entry bag", () => {
+    assert.equal(canResetActiveHistory(), false);
+    state.currentMediaId = 1;
+    resetHistory(1);
+    assert.equal(canResetActiveHistory(), false);
+    assert.equal(resetActiveHistoryToCurrent(), false);
+    assert.deepEqual(state.history, [1]);
+  });
+
+  it("collapses browse history to current id only", () => {
+    resetHistory(1);
+    pushHistory(2);
+    pushHistory(3);
+    state.currentMediaId = 2;
+    state.historyCursor = 1;
+    assert.equal(canResetActiveHistory(), true);
+    assert.equal(resetActiveHistoryToCurrent(), true);
+    assert.deepEqual(state.history, [2]);
+    assert.equal(state.historyCursor, 0);
+    assert.equal(canResetActiveHistory(), false);
+  });
+
+  it("targets slideshow bag while slideshow is active", () => {
+    resetHistory(1);
+    pushHistory(2);
+    resetSlideshowHistory(10);
+    const s = slideshowHistoryBag();
+    s.history = [10, 11, 12];
+    s.historyCursor = 1;
+    state.currentMediaId = 11;
+    state.slideshowStatus = "playing";
+
+    assert.equal(canResetActiveHistory(), true);
+    assert.equal(resetActiveHistoryToCurrent(), true);
+    assert.deepEqual(state.slideshowHistory, [11]);
+    assert.equal(state.slideshowHistoryCursor, 0);
+    // Browse bag untouched
+    assert.deepEqual(state.history, [1, 2]);
   });
 });
 
@@ -172,12 +254,23 @@ describe("clampSlideshowDurationSec", () => {
     assert.equal(clampSlideshowDurationSec(null), DEFAULT_SLIDESHOW_DURATION_SEC);
   });
 
-  it("floors and clamps to 1..3600", () => {
-    assert.equal(clampSlideshowDurationSec(0), 1);
-    assert.equal(clampSlideshowDurationSec(-3), 1);
-    assert.equal(clampSlideshowDurationSec(1.9), 1);
+  it("snaps to nearest preset option", () => {
+    assert.equal(clampSlideshowDurationSec(0), 5);
+    assert.equal(clampSlideshowDurationSec(-3), 5);
+    assert.equal(clampSlideshowDurationSec(1), 5);
     assert.equal(clampSlideshowDurationSec(5), 5);
-    assert.equal(clampSlideshowDurationSec("12"), 12);
-    assert.equal(clampSlideshowDurationSec(99999), 3600);
+    assert.equal(clampSlideshowDurationSec(7), 5);
+    assert.equal(clampSlideshowDurationSec(12), 10);
+    assert.equal(clampSlideshowDurationSec("15"), 15);
+    assert.equal(clampSlideshowDurationSec(45), 30);
+    assert.equal(clampSlideshowDurationSec(90), 60);
+    assert.equal(clampSlideshowDurationSec(200), 120);
+    assert.equal(clampSlideshowDurationSec(99999), 300);
+  });
+
+  it("preserves every listed option exactly", () => {
+    for (const opt of SLIDESHOW_DURATION_OPTIONS) {
+      assert.equal(clampSlideshowDurationSec(opt), opt);
+    }
   });
 });

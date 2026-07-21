@@ -94,8 +94,13 @@ export async function getFirstMedia(rootId: number): Promise<MediaItem | null> {
 export async function getNeighbor(
   id: number,
   direction: "next" | "prev",
+  parentDir?: string | null,
 ): Promise<MediaItem | null> {
-  return invoke<MediaItem | null>("get_neighbor", { id, direction });
+  return invoke<MediaItem | null>("get_neighbor", {
+    id,
+    direction,
+    parentDir: parentDir ?? null,
+  });
 }
 
 export async function getRandom(
@@ -107,6 +112,30 @@ export async function getRandom(
     rootId,
     parentDir: parentDir ?? null,
     excludeId: excludeId ?? null,
+  });
+}
+
+/** Distinct parent directories (absolute paths) under a root with non-missing media. */
+export async function listParentDirs(rootId: number): Promise<string[]> {
+  return invoke<string[]>("list_parent_dirs", { rootId });
+}
+
+/** Media in one parent directory (no tags; list UI). */
+export async function listMediaInDir(
+  rootId: number,
+  parentDir: string,
+): Promise<MediaItem[]> {
+  return invoke<MediaItem[]>("list_media_in_dir", { rootId, parentDir });
+}
+
+/** First non-missing item in a parent directory. */
+export async function getFirstMediaInDir(
+  rootId: number,
+  parentDir: string,
+): Promise<MediaItem | null> {
+  return invoke<MediaItem | null>("get_first_media_in_dir", {
+    rootId,
+    parentDir,
   });
 }
 

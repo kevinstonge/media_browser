@@ -1,13 +1,11 @@
 //! SQLite open + v1 schema migration runner + media/root query helpers.
-//! DB path: app data dir / library.db (e.g. %APPDATA%/com.mediabrowser.app/library.db
-//! or identifier-based path via Tauri path API).
+//! DB path: library.db alongside the executable (portable; same folder as the .exe).
 
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 /// Shared SQLite connection (single-threaded access via mutex).
 pub struct DbState(pub Mutex<Connection>);
@@ -157,12 +155,13 @@ const MEDIA_SELECT: &str = "SELECT id, root_dir_id, path, filename, parent_dir, 
 
 // --- Open / migrate ---------------------------------------------------------
 
-fn app_data_db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("resolve app_data_dir: {e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("create app_data_dir: {e}"))?;
+/// `library.db` next to the running executable (portable install layout).
+fn exe_dir_db_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("resolve current_exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| format!("current_exe has no parent directory: {}", exe.display()))?
+        .to_path_buf();
     Ok(dir.join("library.db"))
 }
 
@@ -201,9 +200,9 @@ fn run_migrations(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
-/// Open library.db under the app data directory and apply schema migrations.
-pub fn open_and_migrate(app: &AppHandle) -> Result<Connection, String> {
-    let path = app_data_db_path(app)?;
+/// Open library.db next to the executable and apply schema migrations.
+pub fn open_and_migrate(_app: &AppHandle) -> Result<Connection, String> {
+    let path = exe_dir_db_path()?;
     let conn = Connection::open(&path).map_err(|e| format!("open sqlite {}: {e}", path.display()))?;
     run_migrations(&conn).map_err(|e| format!("migrate: {e}"))?;
     Ok(conn)
@@ -649,10 +648,12 @@ pub fn get_first_media(conn: &Connection, root_id: i64) -> Result<Option<MediaIt
 }
 
 /// Alpha neighbor by rel_path COLLATE NOCASE. direction: "next" | "prev". Wraps.
+/// When `parent_dir` is set, only items in that folder participate (sequential current-folder).
 pub fn get_neighbor(
     conn: &Connection,
     id: i64,
     direction: &str,
+    parent_dir: Option<&str>,
 ) -> Result<Option<MediaItem>, String> {
     let current = match get_media(conn, id)? {
         Some(m) if !m.is_missing => m,
@@ -665,73 +666,137 @@ pub fn get_neighbor(
     let root_id = current.root_dir_id;
     let rel = &current.rel_path;
 
+    // Scope to explicit parent_dir when provided; otherwise whole root.
+    let scope = parent_dir;
+
     let dir = direction.to_ascii_lowercase();
     let neighbor = match dir.as_str() {
         "next" | "forward" | "right" => {
-            let next = conn
-                .query_row(
-                    &format!(
-                        "{MEDIA_SELECT}
-                         WHERE root_dir_id = ?1 AND is_missing = 0
-                           AND rel_path COLLATE NOCASE > ?2
-                         ORDER BY rel_path COLLATE NOCASE ASC
-                         LIMIT 1"
-                    ),
-                    params![root_id, rel],
-                    map_media_row,
-                )
-                .optional()
-                .map_err(|e| format!("neighbor next: {e}"))?;
-            match next {
-                Some(m) => Some(m),
-                // wrap — row only; tags attached below once
+            let next = match scope {
+                Some(pd) => conn
+                    .query_row(
+                        &format!(
+                            "{MEDIA_SELECT}
+                             WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                               AND rel_path COLLATE NOCASE > ?3
+                             ORDER BY rel_path COLLATE NOCASE ASC
+                             LIMIT 1"
+                        ),
+                        params![root_id, pd, rel],
+                        map_media_row,
+                    )
+                    .optional()
+                    .map_err(|e| format!("neighbor next dir: {e}"))?,
                 None => conn
                     .query_row(
                         &format!(
                             "{MEDIA_SELECT}
                              WHERE root_dir_id = ?1 AND is_missing = 0
+                               AND rel_path COLLATE NOCASE > ?2
                              ORDER BY rel_path COLLATE NOCASE ASC
                              LIMIT 1"
                         ),
-                        params![root_id],
+                        params![root_id, rel],
                         map_media_row,
                     )
                     .optional()
-                    .map_err(|e| format!("neighbor first wrap: {e}"))?,
+                    .map_err(|e| format!("neighbor next: {e}"))?,
+            };
+            match next {
+                Some(m) => Some(m),
+                // wrap — row only; tags attached below once
+                None => match scope {
+                    Some(pd) => conn
+                        .query_row(
+                            &format!(
+                                "{MEDIA_SELECT}
+                                 WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                                 ORDER BY rel_path COLLATE NOCASE ASC
+                                 LIMIT 1"
+                            ),
+                            params![root_id, pd],
+                            map_media_row,
+                        )
+                        .optional()
+                        .map_err(|e| format!("neighbor first wrap dir: {e}"))?,
+                    None => conn
+                        .query_row(
+                            &format!(
+                                "{MEDIA_SELECT}
+                                 WHERE root_dir_id = ?1 AND is_missing = 0
+                                 ORDER BY rel_path COLLATE NOCASE ASC
+                                 LIMIT 1"
+                            ),
+                            params![root_id],
+                            map_media_row,
+                        )
+                        .optional()
+                        .map_err(|e| format!("neighbor first wrap: {e}"))?,
+                },
             }
         }
         "prev" | "previous" | "back" | "left" => {
-            let prev = conn
-                .query_row(
-                    &format!(
-                        "{MEDIA_SELECT}
-                         WHERE root_dir_id = ?1 AND is_missing = 0
-                           AND rel_path COLLATE NOCASE < ?2
-                         ORDER BY rel_path COLLATE NOCASE DESC
-                         LIMIT 1"
-                    ),
-                    params![root_id, rel],
-                    map_media_row,
-                )
-                .optional()
-                .map_err(|e| format!("neighbor prev: {e}"))?;
-            match prev {
-                Some(m) => Some(m),
-                None => {
-                    // wrap to last
-                    conn.query_row(
+            let prev = match scope {
+                Some(pd) => conn
+                    .query_row(
                         &format!(
                             "{MEDIA_SELECT}
-                             WHERE root_dir_id = ?1 AND is_missing = 0
+                             WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                               AND rel_path COLLATE NOCASE < ?3
                              ORDER BY rel_path COLLATE NOCASE DESC
                              LIMIT 1"
                         ),
-                        params![root_id],
+                        params![root_id, pd, rel],
                         map_media_row,
                     )
                     .optional()
-                    .map_err(|e| format!("neighbor last: {e}"))?
-                }
+                    .map_err(|e| format!("neighbor prev dir: {e}"))?,
+                None => conn
+                    .query_row(
+                        &format!(
+                            "{MEDIA_SELECT}
+                             WHERE root_dir_id = ?1 AND is_missing = 0
+                               AND rel_path COLLATE NOCASE < ?2
+                             ORDER BY rel_path COLLATE NOCASE DESC
+                             LIMIT 1"
+                        ),
+                        params![root_id, rel],
+                        map_media_row,
+                    )
+                    .optional()
+                    .map_err(|e| format!("neighbor prev: {e}"))?,
+            };
+            match prev {
+                Some(m) => Some(m),
+                None => match scope {
+                    // wrap to last
+                    Some(pd) => conn
+                        .query_row(
+                            &format!(
+                                "{MEDIA_SELECT}
+                                 WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                                 ORDER BY rel_path COLLATE NOCASE DESC
+                                 LIMIT 1"
+                            ),
+                            params![root_id, pd],
+                            map_media_row,
+                        )
+                        .optional()
+                        .map_err(|e| format!("neighbor last dir: {e}"))?,
+                    None => conn
+                        .query_row(
+                            &format!(
+                                "{MEDIA_SELECT}
+                                 WHERE root_dir_id = ?1 AND is_missing = 0
+                                 ORDER BY rel_path COLLATE NOCASE DESC
+                                 LIMIT 1"
+                            ),
+                            params![root_id],
+                            map_media_row,
+                        )
+                        .optional()
+                        .map_err(|e| format!("neighbor last: {e}"))?,
+                },
             }
         }
         other => return Err(format!("unknown direction: {other}")),
@@ -816,6 +881,72 @@ pub fn get_random(
     attach_tags_opt(conn, item)
 }
 
+/// Distinct parent directories under a root that contain at least one non-missing media item.
+/// Sorted case-insensitively by absolute parent_dir path.
+pub fn list_parent_dirs(conn: &Connection, root_id: i64) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT parent_dir FROM media_item
+             WHERE root_dir_id = ?1 AND is_missing = 0
+             ORDER BY parent_dir COLLATE NOCASE ASC",
+        )
+        .map_err(|e| format!("prepare list_parent_dirs: {e}"))?;
+    let rows = stmt
+        .query_map(params![root_id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query list_parent_dirs: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("list_parent_dirs row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Non-missing media items in a single parent directory, alpha by filename (then rel_path).
+/// Tags are not loaded (list UI only).
+pub fn list_media_in_dir(
+    conn: &Connection,
+    root_id: i64,
+    parent_dir: &str,
+) -> Result<Vec<MediaItem>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{MEDIA_SELECT}
+             WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+             ORDER BY filename COLLATE NOCASE ASC, rel_path COLLATE NOCASE ASC"
+        ))
+        .map_err(|e| format!("prepare list_media_in_dir: {e}"))?;
+    let rows = stmt
+        .query_map(params![root_id, parent_dir], map_media_row)
+        .map_err(|e| format!("query list_media_in_dir: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("list_media_in_dir row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// First non-missing item in a parent directory (alpha by filename).
+pub fn get_first_media_in_dir(
+    conn: &Connection,
+    root_id: i64,
+    parent_dir: &str,
+) -> Result<Option<MediaItem>, String> {
+    let item = conn
+        .query_row(
+            &format!(
+                "{MEDIA_SELECT}
+                 WHERE root_dir_id = ?1 AND is_missing = 0 AND parent_dir = ?2
+                 ORDER BY filename COLLATE NOCASE ASC, rel_path COLLATE NOCASE ASC
+                 LIMIT 1"
+            ),
+            params![root_id, parent_dir],
+            map_media_row,
+        )
+        .optional()
+        .map_err(|e| format!("get_first_media_in_dir: {e}"))?;
+    attach_tags_opt(conn, item)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,7 +1003,7 @@ mod tests {
         let conn = mem_db();
         let root = seed_root(&conn, r"C:\empty");
         // No media; invent an id that does not exist
-        assert!(get_neighbor(&conn, 999, "next").unwrap().is_none());
+        assert!(get_neighbor(&conn, 999, "next", None).unwrap().is_none());
         assert!(get_first_media(&conn, root).unwrap().is_none());
     }
 
@@ -881,8 +1012,12 @@ mod tests {
         let conn = mem_db();
         let root = seed_root(&conn, r"C:\one");
         let id = seed_media(&conn, root, r"C:\one\a.jpg", "a.jpg", r"C:\one");
-        let next = get_neighbor(&conn, id, "next").unwrap().expect("next");
-        let prev = get_neighbor(&conn, id, "prev").unwrap().expect("prev");
+        let next = get_neighbor(&conn, id, "next", None)
+            .unwrap()
+            .expect("next");
+        let prev = get_neighbor(&conn, id, "prev", None)
+            .unwrap()
+            .expect("prev");
         assert_eq!(next.id, id);
         assert_eq!(prev.id, id);
     }
@@ -895,13 +1030,103 @@ mod tests {
         let b = seed_media(&conn, root, r"C:\three\b.jpg", "b.jpg", r"C:\three");
         let c = seed_media(&conn, root, r"C:\three\c.jpg", "c.jpg", r"C:\three");
 
-        assert_eq!(get_neighbor(&conn, a, "next").unwrap().unwrap().id, b);
-        assert_eq!(get_neighbor(&conn, b, "next").unwrap().unwrap().id, c);
-        assert_eq!(get_neighbor(&conn, c, "next").unwrap().unwrap().id, a); // wrap
+        assert_eq!(
+            get_neighbor(&conn, a, "next", None).unwrap().unwrap().id,
+            b
+        );
+        assert_eq!(
+            get_neighbor(&conn, b, "next", None).unwrap().unwrap().id,
+            c
+        );
+        assert_eq!(
+            get_neighbor(&conn, c, "next", None).unwrap().unwrap().id,
+            a
+        ); // wrap
 
-        assert_eq!(get_neighbor(&conn, a, "prev").unwrap().unwrap().id, c); // wrap
-        assert_eq!(get_neighbor(&conn, b, "prev").unwrap().unwrap().id, a);
-        assert_eq!(get_neighbor(&conn, c, "prev").unwrap().unwrap().id, b);
+        assert_eq!(
+            get_neighbor(&conn, a, "prev", None).unwrap().unwrap().id,
+            c
+        ); // wrap
+        assert_eq!(
+            get_neighbor(&conn, b, "prev", None).unwrap().unwrap().id,
+            a
+        );
+        assert_eq!(
+            get_neighbor(&conn, c, "prev", None).unwrap().unwrap().id,
+            b
+        );
+    }
+
+    #[test]
+    fn neighbor_parent_dir_constrained() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\lib");
+        let a1 = seed_media(
+            &conn,
+            root,
+            r"C:\lib\a\1.jpg",
+            r"a\1.jpg",
+            r"C:\lib\a",
+        );
+        let a2 = seed_media(
+            &conn,
+            root,
+            r"C:\lib\a\2.jpg",
+            r"a\2.jpg",
+            r"C:\lib\a",
+        );
+        let _b = seed_media(
+            &conn,
+            root,
+            r"C:\lib\b\3.jpg",
+            r"b\3.jpg",
+            r"C:\lib\b",
+        );
+
+        // Scoped next/prev stays in folder a (wraps within a).
+        assert_eq!(
+            get_neighbor(&conn, a1, "next", Some(r"C:\lib\a"))
+                .unwrap()
+                .unwrap()
+                .id,
+            a2
+        );
+        assert_eq!(
+            get_neighbor(&conn, a2, "next", Some(r"C:\lib\a"))
+                .unwrap()
+                .unwrap()
+                .id,
+            a1
+        );
+        assert_eq!(
+            get_neighbor(&conn, a1, "prev", Some(r"C:\lib\a"))
+                .unwrap()
+                .unwrap()
+                .id,
+            a2
+        );
+    }
+
+    #[test]
+    fn list_parent_dirs_and_media_in_dir() {
+        let conn = mem_db();
+        let root = seed_root(&conn, r"C:\lib");
+        let _ = seed_media(&conn, root, r"C:\lib\a\one.jpg", r"a\one.jpg", r"C:\lib\a");
+        let _ = seed_media(&conn, root, r"C:\lib\b\two.jpg", r"b\two.jpg", r"C:\lib\b");
+        let _ = seed_media(&conn, root, r"C:\lib\a\three.jpg", r"a\three.jpg", r"C:\lib\a");
+
+        let dirs = list_parent_dirs(&conn, root).unwrap();
+        assert_eq!(dirs, vec![r"C:\lib\a".to_string(), r"C:\lib\b".to_string()]);
+
+        let in_a = list_media_in_dir(&conn, root, r"C:\lib\a").unwrap();
+        assert_eq!(in_a.len(), 2);
+        assert_eq!(in_a[0].filename, "one.jpg");
+        assert_eq!(in_a[1].filename, "three.jpg");
+
+        let first = get_first_media_in_dir(&conn, root, r"C:\lib\b")
+            .unwrap()
+            .expect("first in b");
+        assert_eq!(first.filename, "two.jpg");
     }
 
     #[test]

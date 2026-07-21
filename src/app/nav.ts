@@ -1,14 +1,22 @@
 /**
- * Navigation: next/prev with alpha | random modes and session history.
+ * Navigation: next/prev with sequential | random modes and session history.
+ *
+ * One global nav mode applies to every input (keyboard, mouse, wheel, toolbar)
+ * and to the slideshow timer (which only auto-sends "next").
  *
  * While slideshow is active (playing or paused), next/prev use slideshow
- * nav mode + slideshow history. Manual steps notify the slideshow timer
- * so the duration clock resets.
+ * history. Manual steps notify the slideshow timer so the duration clock resets.
  *
  * Each goNext/goPrev freezes the history bag + nav session generation at
  * entry so Stop/Start mid-await cannot redirect mutations onto the other bag.
  *
- * Inputs: Right = next, Left = prev; right-click = next, left-click = prev.
+ * Sequential (all/current): SQL neighbors wrap at list ends (first↔last within
+ * the active scope). Random: session history grows at either end — next past
+ * the tip appends a new random id; prev past the start prepends a new random id
+ * so browsing is infinite in both directions.
+ *
+ * Inputs: Right = next, Left = prev; right-click = next, left-click = prev;
+ * wheel down = next, wheel up = prev; toolbar Previous / Next buttons.
  * Clicks over chrome / form controls / video do not fire left-click prev.
  */
 
@@ -33,14 +41,18 @@ import {
   activeHistoryBag,
   activeNavMode,
   clampSlideshowDurationSec,
+  composeNavMode,
   isNavMode,
   isNavSessionStale,
+  isSequentialMode,
   isSlideshowActive,
   reconcileBrowseHistoryWithCurrent,
   resetHistory,
   setCurrentMedia,
   state,
   type NavMode,
+  type NavOrder,
+  type NavScope,
 } from "./state";
 import { isOverChrome } from "./ui/chrome";
 import { showMedia } from "./ui/stage";
@@ -53,6 +65,12 @@ let statusClearTimer: number | null = null;
 
 /** Fired after a successful next/prev step (for slideshow timer reset). */
 let onNavStepListener: (() => void) | null = null;
+
+/** Fired after media is shown (toolbar filename / folder lists). */
+let onMediaChromeListener: (() => void) | null = null;
+
+/** Fired when global nav mode or duration changes (toolbar / settings sync). */
+let onNavSettingsListener: (() => void) | null = null;
 
 /** Serialized last_media_id writes — always flush the latest id. */
 let lastMediaWriteQueue: Promise<void> = Promise.resolve();
@@ -67,11 +85,37 @@ export function setNavStepListener(fn: (() => void) | null): void {
   onNavStepListener = fn;
 }
 
+/** Top toolbar registers this to refresh folder/file chrome after display. */
+export function setMediaChromeListener(fn: (() => void) | null): void {
+  onMediaChromeListener = fn;
+}
+
+/** Toolbar / settings register to keep dropdowns in sync. */
+export function setNavSettingsListener(fn: (() => void) | null): void {
+  onNavSettingsListener = fn;
+}
+
 function notifyNavStep(): void {
   try {
     onNavStepListener?.();
   } catch (err) {
     console.warn("nav step listener failed", err);
+  }
+}
+
+function notifyMediaChrome(): void {
+  try {
+    onMediaChromeListener?.();
+  } catch (err) {
+    console.warn("media chrome listener failed", err);
+  }
+}
+
+function notifyNavSettings(): void {
+  try {
+    onNavSettingsListener?.();
+  } catch (err) {
+    console.warn("nav settings listener failed", err);
   }
 }
 
@@ -118,7 +162,8 @@ export async function displayMedia(item: MediaItem): Promise<void> {
   clearTagPresentation();
   const present = await showMedia(item);
   applyTagsAfterPresent(item, present);
-  flashStatus(item.filename);
+  // Filename is shown in the top toolbar file selector — no bottom flash.
+  notifyMediaChrome();
   // Await so navigating gate covers the write; queue keeps latest id wins.
   await persistLastMediaId(item.id);
 }
@@ -146,7 +191,7 @@ async function displayMediaForNav(
     return false;
   }
   applyTagsAfterPresent(item, present);
-  flashStatus(item.filename);
+  notifyMediaChrome();
   await persistLastMediaId(item.id);
 
   if (isNavSessionStale(generation)) {
@@ -178,6 +223,14 @@ function canNavigate(): boolean {
     state.root.id > 0 &&
     state.currentMediaId != null
   );
+}
+
+/** Parent-dir constraint for current-folder modes. */
+function parentDirForMode(mode: NavMode): string | null {
+  if (mode === "alpha_current_dir" || mode === "random_current_dir") {
+    return state.currentMedia?.parentDir ?? null;
+  }
+  return null;
 }
 
 async function pickRandomNext(
@@ -237,9 +290,6 @@ async function walkHistory(
       if (direction === "back") commitBackBag(bag);
       else commitForwardBag(bag);
       if (!(await displayMediaForNav(item, generation))) return "aborted";
-      if (skipped > 0) {
-        flashStatus(item.filename, 2500);
-      }
       return "loaded";
     } catch (err) {
       console.error("history load failed", err);
@@ -262,7 +312,7 @@ export async function goNext(): Promise<void> {
   state.navigating = true;
   try {
     // Random modes: replay forward history when not at tip (peek, then commit).
-    if (mode !== "alpha") {
+    if (!isSequentialMode(mode)) {
       const result = await walkHistory(bag, "forward", generation);
       if (result === "loaded") {
         if (!isNavSessionStale(generation)) notifyNavStep();
@@ -275,8 +325,8 @@ export async function goNext(): Promise<void> {
     if (isNavSessionStale(generation)) return;
 
     let item: MediaItem | null = null;
-    if (mode === "alpha") {
-      item = await getNeighbor(startId, "next");
+    if (isSequentialMode(mode)) {
+      item = await getNeighbor(startId, "next", parentDirForMode(mode));
     } else {
       item = await pickRandomNext(mode, startId);
     }
@@ -304,7 +354,12 @@ export async function goNext(): Promise<void> {
   }
 }
 
-/** Previous: history first; alpha may SQL-prev past start; random no-ops at start. */
+/**
+ * Previous: history first; when exhausted past the start:
+ * - sequential: SQL-prev (wraps within all/current scope) and unshift
+ * - random: pick a new random item and unshift so history grows infinitely
+ *   in both directions (browse + slideshow share this path)
+ */
 export async function goPrev(): Promise<void> {
   if (!canNavigate() || state.currentMediaId == null) return;
 
@@ -321,18 +376,22 @@ export async function goPrev(): Promise<void> {
       return;
     }
     if (result === "error" || result === "aborted") return;
-    // exhausted history — alpha can still SQL-prev; random stays at first entry
+    // exhausted history — extend past the start (sequential wrap or new random)
 
-    if (mode !== "alpha") {
-      return;
+    if (isNavSessionStale(generation)) return;
+
+    let item: MediaItem | null = null;
+    if (isSequentialMode(mode)) {
+      item = await getNeighbor(startId, "prev", parentDirForMode(mode));
+    } else {
+      // Mirror goNext at the tip: grow history with a fresh random pick.
+      item = await pickRandomNext(mode, startId);
     }
 
     if (isNavSessionStale(generation)) return;
-
-    const item = await getNeighbor(startId, "prev");
-    if (isNavSessionStale(generation)) return;
     if (!item) return;
 
+    // Single-item library / same id: keep history stable, skip media rebuild.
     if (item.id === state.currentMediaId) {
       unshiftHistoryBag(bag, item.id);
       if (!isNavSessionStale(generation)) notifyNavStep();
@@ -352,22 +411,38 @@ export async function goPrev(): Promise<void> {
   }
 }
 
+/** Set global nav mode (browse + slideshow). Persists and keeps legacy key in sync. */
 export async function setNavMode(mode: NavMode): Promise<void> {
   state.navMode = mode;
+  state.slideshowNavMode = mode;
   try {
     await settingsSet("nav_mode", JSON.stringify(mode));
   } catch (err) {
     console.warn("persist nav_mode failed", err);
   }
-}
-
-export async function setSlideshowNavMode(mode: NavMode): Promise<void> {
-  state.slideshowNavMode = mode;
+  // Keep legacy slideshow_nav_mode key aligned so older builds still read sense.
   try {
     await settingsSet("slideshow_nav_mode", JSON.stringify(mode));
   } catch (err) {
     console.warn("persist slideshow_nav_mode failed", err);
   }
+  notifyNavSettings();
+}
+
+/** Compose from order × scope dropdowns. */
+export async function setNavOrderAndScope(
+  order: NavOrder,
+  scope: NavScope,
+): Promise<void> {
+  await setNavMode(composeNavMode(order, scope));
+}
+
+/**
+ * @deprecated Use setNavMode — slideshow shares the global mode.
+ * Kept so existing call sites compile until fully removed.
+ */
+export async function setSlideshowNavMode(mode: NavMode): Promise<void> {
+  await setNavMode(mode);
 }
 
 export async function setSlideshowDurationSec(seconds: number): Promise<void> {
@@ -382,6 +457,7 @@ export async function setSlideshowDurationSec(seconds: number): Promise<void> {
   if (isSlideshowActive()) {
     notifyNavStep();
   }
+  notifyNavSettings();
 }
 
 export function parseNavMode(raw: string | null | undefined): NavMode {
@@ -459,6 +535,31 @@ export function wireNavClicks(stageEl: HTMLElement): void {
     e.preventDefault();
     void goNext();
   });
+}
+
+/**
+ * Wire mouse wheel: up = previous, down = next.
+ * Ignores chrome / form controls; debounced by navigating gate.
+ */
+export function wireNavWheel(stageEl: HTMLElement): void {
+  stageEl.addEventListener(
+    "wheel",
+    (e) => {
+      if (isNavClickBlocked(e.target)) return;
+      // Ignore trackpad pinch / modified gestures
+      if (e.ctrlKey || e.metaKey) return;
+      // Prefer vertical delta; fall back to horizontal for shift-wheel / tilted
+      const dy = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+      if (dy === 0) return;
+      e.preventDefault();
+      if (dy < 0) {
+        void goPrev();
+      } else {
+        void goNext();
+      }
+    },
+    { passive: false },
+  );
 }
 
 /** Keyboard Left/Right for prev/next. Call from main keydown handler. */

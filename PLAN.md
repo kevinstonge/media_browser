@@ -65,7 +65,7 @@ A lightweight, local-only fullscreen media viewer that:
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
 │  App data                                                   │
-│  - SQLite DB (e.g. %APPDATA%/media-browser/library.db)      │
+│  - SQLite DB (library.db next to the executable)            │
 │  - Optional: last window state only if needed               │
 │  - Media files remain in user-chosen folders (never copied) │
 └─────────────────────────────────────────────────────────────┘
@@ -228,8 +228,8 @@ cursor: number      // index into history
 ```
 
 - **Next (random):** if cursor not at end, move forward in history; else pick new id from DB, append, advance cursor.
-- **Next (alpha):** resolve neighbor via SQL; append if different from current tip strategy (or always push — pick one consistent rule).
-- **Previous:** cursor--; load `history[cursor]`. If cursor at 0, alpha can still SQL-prev; random modes stay at first history entry or no-op.
+- **Next (alpha):** resolve neighbor via SQL (wraps at end→first within all/current scope); push onto history.
+- **Previous:** cursor--; load `history[cursor]`. If cursor at 0: alpha SQL-prevs (wraps first→last) and unshifts; random picks a new id from DB, unshifts to the front, and shows it — history grows infinitely in both directions.
 - **Direct jump** (e.g. after scan to first item): reset history to `[id]`, cursor `0`.
 
 Slideshow uses the **same history mechanism** with its own list (or shared list — **recommend separate `slideshowHistory`** so stopping slideshow does not trash manual browse history). Sketch: stop erases slideshow index list; pause retains.

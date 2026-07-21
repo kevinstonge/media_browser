@@ -2,9 +2,11 @@
 
 use crate::db::{
     add_media_tag as db_add_media_tag, add_tag_asset as db_add_tag_asset,
-    create_tag as db_create_tag, delete_tag as db_delete_tag, get_first_media as db_first,
+    create_tag as db_create_tag, delete_tag as db_delete_tag,
+    get_first_media as db_first, get_first_media_in_dir as db_first_in_dir,
     get_last_root as db_last_root, get_media as db_get_media, get_neighbor as db_neighbor,
-    get_random as db_random, get_setting, list_tags as db_list_tags,
+    get_random as db_random, get_setting, list_media_in_dir as db_list_media_in_dir,
+    list_parent_dirs as db_list_parent_dirs, list_tags as db_list_tags,
     remove_media_tag as db_remove_media_tag, remove_tag_asset as db_remove_tag_asset, root_info,
     set_setting, DbState, MediaItem, RootInfo, Tag, TagAsset,
 };
@@ -138,17 +140,19 @@ pub fn get_first_media(
 }
 
 /// Alpha neighbor; direction = "next" | "prev". Wraps at ends.
+/// Optional `parent_dir` limits sequential navigation to one folder.
 #[tauri::command]
 pub fn get_neighbor(
     state: State<'_, DbState>,
     id: i64,
     direction: String,
+    parent_dir: Option<String>,
 ) -> Result<Option<MediaItem>, String> {
     let conn = state
         .0
         .lock()
         .map_err(|e| format!("db lock poisoned: {e}"))?;
-    db_neighbor(&conn, id, &direction)
+    db_neighbor(&conn, id, &direction, parent_dir.as_deref())
 }
 
 /// Random non-missing item in root; optional parent_dir for current-dir random.
@@ -165,6 +169,47 @@ pub fn get_random(
         .lock()
         .map_err(|e| format!("db lock poisoned: {e}"))?;
     db_random(&conn, root_id, parent_dir.as_deref(), exclude_id)
+}
+
+/// Distinct parent directories (absolute) under root with non-missing media.
+#[tauri::command]
+pub fn list_parent_dirs(
+    state: State<'_, DbState>,
+    root_id: i64,
+) -> Result<Vec<String>, String> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|e| format!("db lock poisoned: {e}"))?;
+    db_list_parent_dirs(&conn, root_id)
+}
+
+/// Media items in one parent directory (no tags; for file picker lists).
+#[tauri::command]
+pub fn list_media_in_dir(
+    state: State<'_, DbState>,
+    root_id: i64,
+    parent_dir: String,
+) -> Result<Vec<MediaItem>, String> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|e| format!("db lock poisoned: {e}"))?;
+    db_list_media_in_dir(&conn, root_id, &parent_dir)
+}
+
+/// First non-missing item in a parent directory (alpha by filename).
+#[tauri::command]
+pub fn get_first_media_in_dir(
+    state: State<'_, DbState>,
+    root_id: i64,
+    parent_dir: String,
+) -> Result<Option<MediaItem>, String> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|e| format!("db lock poisoned: {e}"))?;
+    db_first_in_dir(&conn, root_id, &parent_dir)
 }
 
 // --- Tags -------------------------------------------------------------------

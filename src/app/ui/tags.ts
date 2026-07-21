@@ -1,6 +1,6 @@
 /**
- * Per-item tags panel (bottom-left, hover-reveal), top-left badges,
- * and sequential tag-sound queue (no overlap; video audio continues).
+ * Per-item tags panel (top-left below badge strip, hover-reveal),
+ * top-left badges, and sequential tag-sound queue (no overlap; video audio continues).
  */
 
 import {
@@ -63,7 +63,7 @@ export function mountTags(root: HTMLElement, statusFn?: StatusFn): void {
   badgesEl.hidden = true;
   root.appendChild(badgesEl);
 
-  // Bottom-left hover-reveal tags panel
+  // Top-left hover-reveal tags panel (below badge strip; free of video controls)
   chromeEl = document.createElement("div");
   chromeEl.className = "tags-chrome nav-exclude";
   chromeEl.innerHTML = `

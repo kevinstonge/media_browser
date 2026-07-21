@@ -8,6 +8,8 @@ const HELP_ROWS: Array<{ keys: string; action: string }> = [
   { keys: "← / →", action: "Previous / next item" },
   { keys: "Click L / R", action: "Previous / next (stage)" },
   { keys: "Right-click", action: "Next item" },
+  { keys: "Wheel ↑ / ↓", action: "Previous / next item" },
+  { keys: "Toolbar ◀ / ▶", action: "Previous / next item" },
   { keys: "Space", action: "Start / pause / resume slideshow" },
   { keys: "F11", action: "Toggle fullscreen" },
   { keys: "Esc", action: "Close help / exit fullscreen" },

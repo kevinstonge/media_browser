@@ -65,13 +65,13 @@ cargo check
 
 ## Data location
 
-SQLite library database:
+SQLite library database (portable — same folder as the executable):
 
 ```
-%APPDATA%\com.mediabrowser.app\library.db
+<folder-containing-the-exe>\library.db
 ```
 
-(Exact folder name follows Tauri’s `app_data_dir` for identifier `com.mediabrowser.app`.)
+In dev this is typically next to the debug binary under `src-tauri/target/debug/`. Copy or back up `library.db` alongside the `.exe` for portable use.
 
 Schema (v1): `root_dir`, `root_usage`, `media_item`, `tag`, `media_tag`, `tag_asset`, `setting` — see `PLAN.md` §5.1.
 

@@ -68,7 +68,10 @@ export function commitHistoryForward(h: HistoryBag): void {
   }
 }
 
-/** Prepend id when alpha-preving past the start of history. */
+/**
+ * Prepend id when navigating past the start of history
+ * (sequential SQL-prev wrap, or random pick beyond first entry).
+ */
 export function unshiftHistory(h: HistoryBag, id: number): void {
   if (h.history[0] === id) {
     h.historyCursor = 0;
